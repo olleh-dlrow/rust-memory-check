@@ -1,14 +1,14 @@
 /*
  * @Author: Shuwen Chen 
  * @Date: 2023-03-13 00:35:32 
- * @Last Modified by:   Shuwen Chen 
- * @Last Modified time: 2023-03-13 00:35:32 
+ * @Last Modified by: Shuwen Chen
+ * @Last Modified time: 2023-03-13 20:04:01
  */
 use std::io::Write;
 
 pub const LOG4RS_CONFIG_YAML: &str = r#"
-# appender 负责将日志收集到控制台或文件, 可配置多个
-# https://zhuanlan.zhihu.com/p/104921298
+# appender: collect logs to console or file, could have multiple configs
+# ref: https://zhuanlan.zhihu.com/p/104921298
 appenders:
   # stdout:
   #   kind: console
@@ -21,7 +21,7 @@ appenders:
     append: false
     encoder:
       pattern: "{d(%Y-%m-%d %H:%M:%S)} [{f}:{L}] [{h({l:<5})}]  {m}{n}"
-# 对全局 log 进行配置
+# global config
 root:
   level: {$LEVEL}
   appenders:
