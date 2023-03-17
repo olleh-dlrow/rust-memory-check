@@ -2,7 +2,7 @@
  * @Author: Shuwen Chen
  * @Date: 2023-03-13 02:23:14
  * @Last Modified by: Shuwen Chen
- * @Last Modified time: 2023-03-14 00:10:45
+ * @Last Modified time: 2023-03-14 02:54:11
  */
 
 use rustc_middle::mir::terminator::Terminator;
@@ -48,11 +48,16 @@ pub enum OpKind {
     AddressOf,
 }
 
+#[derive(Debug)]
+pub enum RvalKind<'tcx> {
+    Constant,
+    Addressed(Place<'tcx>),
+}
 
 #[derive(Debug)]
 pub struct AssignmentInfo<'tcx> {
     pub lvalue: Place<'tcx>,
-    pub rvalue: Place<'tcx>,
+    pub rvalue: RvalKind<'tcx>,
     pub span: rustc_span::Span,
     pub op: OpKind,
 }
@@ -96,12 +101,15 @@ impl<'tcx> ControlFlowGraph<'tcx> {
                 let assignment_infos: Vec<AssignmentInfo> = bb_data
                     .statements
                     .iter()
-                    .map(|stat| match stat.kind {
-                        StatementKind::Assign(ref assign) => {
-                            get_assignment_infos(assign, stat.source_info.span)
-                        }
-                        _ => {
-                            vec![]
+                    .map(|stat| {
+                        match stat.kind {
+                            StatementKind::Assign(ref assign) => {
+                                get_assignment_infos(assign, stat.source_info.span)
+                            }
+                            _ => {
+                                log::debug!("ignored non-assign statement: {:?}", stat);
+                                vec![]
+                            }
                         }
                     })
                     .flatten()
@@ -182,12 +190,12 @@ fn get_basic_block_successors(terminator_kind: &TerminatorKind) -> HashSet<Basic
             ref target,
             ref unwind,
             ..
-        } => [*target].into_iter().chain(*unwind).collect(),
+        } => Some(*target).into_iter().chain(*unwind).collect(),
         TerminatorKind::DropAndReplace {
             ref target,
             ref unwind,
             ..
-        } => [*target].into_iter().chain(*unwind).collect(),
+        } => Some(*target).into_iter().chain(*unwind).collect(),
         TerminatorKind::Call {
             ref target,
             ref cleanup,
@@ -197,18 +205,18 @@ fn get_basic_block_successors(terminator_kind: &TerminatorKind) -> HashSet<Basic
             ref target,
             ref cleanup,
             ..
-        } => [*target].into_iter().chain(*cleanup).collect(),
+        } => Some(*target).into_iter().chain(*cleanup).collect(),
         TerminatorKind::Yield {
             ref resume,
             ref drop,
             ..
-        } => [*resume].into_iter().chain(*drop).collect(),
+        } => Some(*resume).into_iter().chain(*drop).collect(),
         TerminatorKind::FalseEdge {
             ref real_target, ..
-        } => [*real_target].into_iter().collect(),
+        } => Some(*real_target).into_iter().collect(),
         TerminatorKind::FalseUnwind {
             ref real_target, ..
-        } => [*real_target].into_iter().collect(),
+        } => Some(*real_target).into_iter().collect(),
         TerminatorKind::InlineAsm {
             ref destination,
             ref cleanup,
@@ -220,7 +228,7 @@ fn get_basic_block_successors(terminator_kind: &TerminatorKind) -> HashSet<Basic
 impl<'tcx> AssignmentInfo<'tcx> {
     pub fn new(
         lvalue: Place<'tcx>,
-        rvalue: Place<'tcx>,
+        rvalue: RvalKind<'tcx>,
         span: rustc_span::Span,
         op: OpKind,
     ) -> Self {
@@ -240,53 +248,160 @@ fn get_assignment_infos<'tcx>(
     match assign.1 {
         Rvalue::Use(ref op) => match op {
             Operand::Copy(ref rvalue) => {
-                vec![AssignmentInfo::new(assign.0, *rvalue, span, OpKind::Copy)]
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Copy,
+                )]
             }
             Operand::Move(ref rvalue) => {
-                vec![AssignmentInfo::new(assign.0, *rvalue, span, OpKind::Move)]
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Move,
+                )]
             }
-            _ => vec![],
+            Operand::Constant(ref _constant) => {
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Constant,
+                    span,
+                    OpKind::Copy,
+                )]
+            }
         },
         Rvalue::Ref(_, _, ref rvalue) => {
-            vec![AssignmentInfo::new(assign.0, *rvalue, span, OpKind::Ref)]
+            vec![AssignmentInfo::new(
+                assign.0,
+                RvalKind::Addressed(*rvalue),
+                span,
+                OpKind::Ref,
+            )]
         }
         Rvalue::AddressOf(_, ref rvalue) => {
             vec![AssignmentInfo::new(
                 assign.0,
-                *rvalue,
+                RvalKind::Addressed(*rvalue),
                 span,
                 OpKind::AddressOf,
             )]
         }
         // TODO: handle assignment ShallowInitBox
         Rvalue::ShallowInitBox(ref _op, _) => {
+            log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
             vec![]
         }
         Rvalue::Cast(_, ref op, _) => match op {
             Operand::Copy(ref rvalue) => {
-                vec![AssignmentInfo::new(assign.0, *rvalue, span, OpKind::Copy)]
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Copy,
+                )]
             }
             Operand::Move(ref rvalue) => {
-                vec![AssignmentInfo::new(assign.0, *rvalue, span, OpKind::Move)]
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Move,
+                )]
             }
-            _ => vec![],
+            Operand::Constant(ref _constant) => {
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Constant,
+                    span,
+                    OpKind::Copy,
+                )]
+            }
         },
         Rvalue::Aggregate(_, ref ops) => ops
             .iter()
             .map(|op| match op {
-                Operand::Copy(ref rvalue) => {
-                    Some(AssignmentInfo::new(assign.0, *rvalue, span, OpKind::Copy))
-                }
-                Operand::Move(ref rvalue) => {
-                    Some(AssignmentInfo::new(assign.0, *rvalue, span, OpKind::Move))
-                }
-                _ => None,
+                Operand::Copy(ref rvalue) => Some(AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Copy,
+                )),
+                Operand::Move(ref rvalue) => Some(AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Move,
+                )),
+                Operand::Constant(ref _constant) => Some(AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Constant,
+                    span,
+                    OpKind::Copy,
+                )),
             })
             .flatten()
             .collect(),
         Rvalue::Discriminant(ref rvalue) => {
-            vec![AssignmentInfo::new(assign.0, *rvalue, span, OpKind::Move)]
+            vec![AssignmentInfo::new(
+                assign.0,
+                RvalKind::Addressed(*rvalue),
+                span,
+                OpKind::Move,
+            )]
         }
-        _ => vec![],
+        Rvalue::Repeat(ref op, _) => match op {
+            Operand::Copy(ref rvalue) => {
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Copy,
+                )]
+            }
+            Operand::Move(ref rvalue) => {
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Move,
+                )]
+            }
+            Operand::Constant(ref _constant) => {
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Constant,
+                    span,
+                    OpKind::Copy,
+                )]
+            }
+        },
+        Rvalue::ThreadLocalRef(_) => {
+            log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
+            vec![]
+        }
+        Rvalue::Len(_) => {
+            log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
+            vec![]
+        }
+        // eg. Gt(move _4, move _5)
+        Rvalue::BinaryOp(_, _) => {
+            log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
+            vec![]
+        }
+        // eg. CheckedAdd(_1, const 1i32)
+        Rvalue::CheckedBinaryOp(_, _) => {
+            log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
+            vec![]
+        }
+        Rvalue::NullaryOp(_, _) => {
+            log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
+            vec![]
+        }
+        Rvalue::UnaryOp(_, _) => {
+            log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
+            vec![]
+        }
     }
 }
