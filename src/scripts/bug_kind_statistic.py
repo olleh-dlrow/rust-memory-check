@@ -143,7 +143,7 @@ def draw_memory_safety_statistics_with_year():
     plt.show()
 
 
-def draw_memory_safety_statistics():
+def draw_memory_safety_statistics(top=5):
     import matplotlib.pyplot as plt
     # 读取data/memory_safety_statistics/目录下的所有文件
     all_records = []
@@ -161,16 +161,17 @@ def draw_memory_safety_statistics():
     # 绘制柱状图，x轴为漏洞类型，其标签文字垂直显示，保证所有文字都能显示出来
     # y轴为漏洞数量，在柱状图上方显示数字
     # 将所有数据绘制在一张图上，保存到data/memory_safety_statistics.png
-    kinds = [i['kind'] for i in all_records]
-    counts = [i['counts'] for i in all_records]
+    top = min(top, len(all_records))
+    kinds = [i['kind'] for i in all_records][0:top]
+    counts = [i['counts'] for i in all_records][0:top]
     plt.bar(kinds, counts)
-    plt.xticks(kinds, rotation=90)
+    plt.xticks(kinds, rotation=45)
     for x, y in zip(kinds, counts):
         plt.text(x, y + 0.05, '%d' % y, ha='center', va='bottom')
     plt.subplots_adjust(left=0.026, bottom=0.157, right=0.97, top=0.957, wspace=0.2, hspace=0.2)
     # plt.show()
     plt.gcf().set_size_inches(26.54, 13.80)
-    plt.savefig('data/memory_safety_statistics.png', dpi=96)
+    plt.savefig('data/memory_safety_statistics_top' + str(top) + '.png', dpi=96)
     plt.tight_layout()
     
 
@@ -223,4 +224,4 @@ def demo():
 
 
 if __name__ == '__main__':
-    draw_memory_safety_statistics()
+    draw_memory_safety_statistics(top=10)

@@ -5,6 +5,7 @@
  * @Last Modified time: 2023-03-14 02:54:11
  */
 
+use rustc_middle::mir::ProjectionElem;
 use rustc_middle::mir::terminator::Terminator;
 use rustc_middle::mir::terminator::TerminatorKind;
 use rustc_middle::mir::Operand;
@@ -13,6 +14,10 @@ use rustc_middle::mir::Rvalue;
 use rustc_middle::mir::StatementKind;
 use rustc_span::Span;
 use std::collections::{HashMap, HashSet};
+
+use crate::core::utils;
+
+use crate::core::utils::AnalysisOptions;
 
 type LocalId = rustc_middle::mir::Local;
 type BasicBlockId = rustc_middle::mir::BasicBlock;
@@ -64,15 +69,18 @@ pub struct AssignmentInfo<'tcx> {
 
 #[derive(Debug)]
 pub struct ControlFlowGraph<'tcx> {
+    pub options: AnalysisOptions,
     pub def_id: rustc_hir::def_id::DefId,
     pub local_infos: HashMap<LocalId, LocalInfo<'tcx>>,
     pub basic_block_infos: HashMap<BasicBlockId, BasicBlockInfo<'tcx>>,
 }
 
 impl<'tcx> ControlFlowGraph<'tcx> {
-    pub fn new(tcx: rustc_middle::ty::TyCtxt<'tcx>, def_id: rustc_hir::def_id::DefId) -> Self {
+    pub fn new(opts: &AnalysisOptions, tcx: rustc_middle::ty::TyCtxt<'tcx>, def_id: rustc_hir::def_id::DefId) -> Self {
         let body: &rustc_middle::mir::Body = tcx.optimized_mir(def_id);
-        // log::debug!("body of def id {:?}: \n{:#?}", def_id, body);
+        if utils::has_dbg(opts, "body") {
+            log::debug!("body of def id {:?}: \n{:#?}", def_id, body);
+        }
 
         let local_infos = body
             .local_decls
@@ -104,6 +112,11 @@ impl<'tcx> ControlFlowGraph<'tcx> {
                     .map(|stat| {
                         match stat.kind {
                             StatementKind::Assign(ref assign) => {
+                                if utils::has_dbg(opts, "assign") {
+                                    log::debug!("statement: {:?}", stat);
+                                    log::debug!("assign: {}", get_rvalue_name(&assign.1));
+                                    log::debug!("");
+                                }
                                 get_assignment_infos(assign, stat.source_info.span)
                             }
                             _ => {
@@ -127,6 +140,7 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             .collect::<HashMap<_, _>>();
 
         Self {
+            options: opts.clone(),
             def_id,
             local_infos,
             basic_block_infos,
@@ -241,12 +255,64 @@ impl<'tcx> AssignmentInfo<'tcx> {
     }
 }
 
+fn get_place_projection_name(place: &Place<'_>) -> String {
+    let mut name = String::new();
+    for proj in place.projection.iter() {
+        match proj {
+            ProjectionElem::Deref => name.push_str("deref"),
+            ProjectionElem::Field(field, _) => name.push_str(&format!("field{}", field.index())),
+            ProjectionElem::Index(local) => name.push_str(&format!("index{}", local.index())),
+            ProjectionElem::ConstantIndex { offset, .. } => {
+                name.push_str(&format!("constant_index{}", offset))
+            }
+            ProjectionElem::Subslice { from, to, .. } => {
+                name.push_str(&format!("subslice{}{}", from, to))
+            }
+            ProjectionElem::Downcast(_, variant) => {
+                name.push_str(&format!("downcast{}", variant.index()))
+            }
+        }
+    }
+    name
+}
+
+fn get_rvalue_name<'tcx>(rvalue: &Rvalue<'tcx>) -> String {
+    match rvalue {
+        Rvalue::Use(ref op) => match op {
+            Operand::Copy(ref rvalue) => format!("use copy({:?}) proj: {}", rvalue, get_place_projection_name(rvalue)),
+            Operand::Move(ref rvalue) => format!("use move({:?}) proj: {}", rvalue, get_place_projection_name(rvalue)), 
+            Operand::Constant(ref constant) => format!("use constant {:?}", constant),
+        },
+        Rvalue::Repeat(ref op, ref _count) => format!("repeat({:?})", op),
+        Rvalue::Ref(_, _, ref place) => format!("ref({:?})", place),
+        Rvalue::Len(ref place) => format!("len({:?})", place),
+        Rvalue::Cast(_, ref op, ref _ty) => match op {
+            Operand::Copy(ref rvalue) => format!("cast copy({:?}) proj: {}", rvalue, get_place_projection_name(rvalue)),             
+            Operand::Move(ref rvalue) => format!("cast move({:?}) proj: {}", rvalue, get_place_projection_name(rvalue)),            
+            Operand::Constant(ref constant) => format!("cast constant {:?}", constant),
+        },
+        Rvalue::BinaryOp(..) => format!("binary_op"),
+        Rvalue::CheckedBinaryOp(..) => {
+            format!("checked_binary_op")
+        }
+        Rvalue::UnaryOp(_, ref op) => format!("unary_op({:?})", op),
+        Rvalue::Discriminant(ref place) => format!("discriminant({:?})", place),
+        Rvalue::NullaryOp(_, ref _ty) => "nullary_op".to_string(),
+        Rvalue::Aggregate(_, ref ops) => format!("aggregate({:?})", ops),
+        Rvalue::ThreadLocalRef(_) => format!("thread_local_ref"),
+        Rvalue::AddressOf(_, _) => format!("address_of"),
+        Rvalue::ShallowInitBox(_, _) => format!("shallow_init_box"),
+    }
+}
+
+
 fn get_assignment_infos<'tcx>(
     assign: &Box<(Place<'tcx>, Rvalue<'tcx>)>,
     span: Span,
 ) -> Vec<AssignmentInfo<'tcx>> {
     match assign.1 {
         Rvalue::Use(ref op) => match op {
+            // eg. _3: i32 = _2: i32, 
             Operand::Copy(ref rvalue) => {
                 vec![AssignmentInfo::new(
                     assign.0,
@@ -255,6 +321,7 @@ fn get_assignment_infos<'tcx>(
                     OpKind::Copy,
                 )]
             }
+            // eg. _6 = move _4
             Operand::Move(ref rvalue) => {
                 vec![AssignmentInfo::new(
                     assign.0,
@@ -263,6 +330,8 @@ fn get_assignment_infos<'tcx>(
                     OpKind::Move,
                 )]
             }
+            // eg. _1 = const 1_i32, (_4.0: i32) = const 1_i32
+            // _5 = (_4.0: i32)
             Operand::Constant(ref _constant) => {
                 vec![AssignmentInfo::new(
                     assign.0,
@@ -272,6 +341,7 @@ fn get_assignment_infos<'tcx>(
                 )]
             }
         },
+        // eg. _2 = &_1
         Rvalue::Ref(_, _, ref rvalue) => {
             vec![AssignmentInfo::new(
                 assign.0,
@@ -280,6 +350,7 @@ fn get_assignment_infos<'tcx>(
                 OpKind::Ref,
             )]
         }
+        // eg. _14 = &raw const (*_15), let i = &x as *const i32
         Rvalue::AddressOf(_, ref rvalue) => {
             vec![AssignmentInfo::new(
                 assign.0,
@@ -302,6 +373,7 @@ fn get_assignment_infos<'tcx>(
                     OpKind::Copy,
                 )]
             }
+            // eg. _16 = move _17 as *const i32, let j = x as *const i32
             Operand::Move(ref rvalue) => {
                 vec![AssignmentInfo::new(
                     assign.0,
@@ -351,6 +423,7 @@ fn get_assignment_infos<'tcx>(
                 OpKind::Move,
             )]
         }
+        // eg. _22 = [const 123_i32; 12]
         Rvalue::Repeat(ref op, _) => match op {
             Operand::Copy(ref rvalue) => {
                 vec![AssignmentInfo::new(

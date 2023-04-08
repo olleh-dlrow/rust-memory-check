@@ -3,5 +3,6 @@ import sys
 if os.system("cargo build"):
     exit(-1)
 
-file_path = sys.argv[1]
-os.system(f"cargo run --bin mc {file_path}")
+args = sys.argv[1:]
+cmd = "cargo run --bin mc " + " ".join(args)
+os.system(cmd)

@@ -24,18 +24,27 @@ pub mod core {
     pub mod utils;
 }
 
-use crate::core::cfg::ControlFlowGraph;
+use crate::core::utils::AnalysisOptions;
+use std::collections::HashMap;
+
+use rustc_hir::def_id::DefId;
+
+use crate::core::{cfg::ControlFlowGraph, utils};
 
 pub fn analysis_then_check() -> Result<(), rustc_errors::ErrorGuaranteed> {
     rustc_driver::catch_fatal_errors(move || {
         let rustc_args = get_rustc_args();
-        let mut callbacks = MemoryCheckCallbacks;
+        let (options, rustc_args) = utils::parse_args(&rustc_args);
+
+        let mut callbacks = MemoryCheckCallbacks { options };
         rustc_driver::RunCompiler::new(&rustc_args, &mut callbacks).run()
     })
     .and_then(|result| result)
 }
 
-struct MemoryCheckCallbacks;
+struct MemoryCheckCallbacks {
+    options: AnalysisOptions,
+}
 
 impl rustc_driver::Callbacks for MemoryCheckCallbacks {
     fn after_analysis<'tcx>(
@@ -46,29 +55,66 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
         compiler.session().abort_if_errors();
 
         queries.global_ctxt().unwrap().peek_mut().enter(|tcx| {
-            tcx.hir().par_body_owners(|local_def_id| {
-                analysis_then_check_body(tcx, local_def_id.to_def_id())
+            let mut cfgs: HashMap<DefId, ControlFlowGraph> = HashMap::new();
+            let mut entry_def_id: Option<DefId> = None;
+            let options = self.options.clone();
+
+            tcx.hir().body_owners().for_each(|local_def_id| {
+                // analysis_then_check_body(tcx, local_def_id.to_def_id())
+                let def_id = local_def_id.to_def_id();
+                let def_name = format!("{:?}", def_id);
+                if def_name.contains("main") {
+                    entry_def_id = Some(def_id);
+                }
+
+                if let Some(cfg) = try_get_cfg(&options, tcx, def_id) {
+                    assert!(!cfgs.contains_key(&def_id));
+                    cfgs.insert(def_id, cfg);
+                }
             });
+
+            if let Some(entry_def_id) = entry_def_id {
+                log::debug!("entry def id: {:?}", entry_def_id);
+                // TODO: analysis from entry call
+            }
         });
         rustc_driver::Compilation::Continue
     }
 }
 
-fn analysis_then_check_body(tcx: rustc_middle::ty::TyCtxt, def_id: rustc_hir::def_id::DefId) {
+fn try_get_cfg<'tcx>(opts: &AnalysisOptions, tcx: rustc_middle::ty::TyCtxt<'tcx>, def_id: DefId) -> Option<ControlFlowGraph<'tcx>> {
     if let Some(other) = tcx.hir().body_const_context(def_id.expect_local()) {
         log::debug!("ignore const context of def id {:?}: {:?}", def_id, other);
-        return;
+        return None;
     }
 
     if tcx.is_mir_available(def_id) {
-        let mut cfg = ControlFlowGraph::new(tcx, def_id);
-        log::debug!("control flow graph of def id {:?}: {:#?}", def_id, cfg);
-        crate::core::analysis::alias_analysis(&mut cfg);
-        let _report = crate::core::check::check_then_report(&mut cfg);
+        let cfg = ControlFlowGraph::new(opts, tcx, def_id);
+        if utils::has_dbg(&opts, "cfg") {
+            log::debug!("control flow graph of def id {:?}: {:#?}", def_id, cfg);
+        }
+        Some(cfg)
     } else {
         log::debug!("MIR is unavailable for def id {:?}", def_id);
+        None
     }
 }
+
+// fn analysis_then_check_body(opts: &AnalysisOptions, tcx: rustc_middle::ty::TyCtxt, def_id: rustc_hir::def_id::DefId) {
+//     if let Some(other) = tcx.hir().body_const_context(def_id.expect_local()) {
+//         log::debug!("ignore const context of def id {:?}: {:?}", def_id, other);
+//         return;
+//     }
+
+//     if tcx.is_mir_available(def_id) {
+//         let mut cfg = ControlFlowGraph::new(opts, tcx, def_id);
+//         log::debug!("control flow graph of def id {:?}: {:#?}", def_id, cfg);
+//         crate::core::analysis::alias_analysis(&mut cfg);
+//         let _report = crate::core::check::check_then_report(&mut cfg);
+//     } else {
+//         log::debug!("MIR is unavailable for def id {:?}", def_id);
+//     }
+// }
 
 fn get_rustc_args() -> Vec<String> {
     let rustc_args = std::env::args().into_iter().collect::<Vec<String>>();
@@ -121,5 +167,18 @@ mod tests {
         let content = std::fs::read_to_string(log_path.to_str().unwrap())
             .expect(&format!("read {} failed.", log_path.to_str().unwrap()));
         assert!(content.contains(DEBUG_INFO));
+    }
+
+    #[test]
+    fn test_arg_parse() {
+        let args = vec![
+            "mc".to_owned(),
+            "--sysroot".to_owned(),
+            "/home/xxx/.rustup/toolchains/stable-x86_64-unknown-linux-gnu".to_owned(),
+            "--DBG=cfg,body".to_owned(),
+        ];
+
+        let (options, _) = utils::parse_args(&args);
+        assert_eq!(options.debug_opts, vec!["cfg", "body"]);
     }
 }
