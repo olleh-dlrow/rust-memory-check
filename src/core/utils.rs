@@ -6,6 +6,10 @@
  */
 use std::{io::Write};
 
+use crate::core::AnalysisOptions;
+
+use super::LocalId;
+
 pub const LOG4RS_CONFIG_YAML: &str = r#"
 # appender: collect logs to console or file, could have multiple configs
 # ref: https://zhuanlan.zhihu.com/p/104921298
@@ -54,15 +58,9 @@ pub fn init_log(level: log::Level) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-pub struct AnalysisOptions {
-    pub debug_opts: Vec<String>,
-}
-
 pub fn has_dbg(opts: &AnalysisOptions, opt_name: &str) -> bool {
     opts.debug_opts.iter().any(|s| s == opt_name)
 }
-
 
 pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
     let mut index_removed = vec![];
@@ -93,3 +91,5 @@ pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
         .collect::<Vec<String>>();
     (AnalysisOptions { debug_opts }, new_args)
 }
+
+

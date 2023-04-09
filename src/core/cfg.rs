@@ -2,70 +2,34 @@
  * @Author: Shuwen Chen
  * @Date: 2023-03-13 02:23:14
  * @Last Modified by: Shuwen Chen
- * @Last Modified time: 2023-03-14 02:54:11
+ * @Last Modified time: 2023-04-09 17:53:36
  */
 
-use rustc_middle::mir::ProjectionElem;
-use rustc_middle::mir::terminator::Terminator;
 use rustc_middle::mir::terminator::TerminatorKind;
 use rustc_middle::mir::Operand;
 use rustc_middle::mir::Place;
+use rustc_middle::mir::ProjectionElem;
 use rustc_middle::mir::Rvalue;
 use rustc_middle::mir::StatementKind;
+use rustc_middle::ty;
+use rustc_middle::ty::TyKind;
 use rustc_span::Span;
 use std::collections::{HashMap, HashSet};
 
 use crate::core::utils;
 
-use crate::core::utils::AnalysisOptions;
+use crate::core::AnalysisOptions;
 
-type LocalId = rustc_middle::mir::Local;
-type BasicBlockId = rustc_middle::mir::BasicBlock;
+use crate::core::BasicBlockId;
+use crate::core::LocalId;
 
-#[derive(Debug)]
-pub struct FieldInfo {}
+use crate::core::AssignmentInfo;
 
-#[derive(Debug)]
-pub struct LocalInfo<'tcx> {
-    pub id: LocalId,
-    pub need_drop: bool,
-    pub ty: rustc_middle::ty::Ty<'tcx>,
-    pub alias: Vec<LocalId>,
-    pub field_info: Option<FieldInfo>,
-    pub var_name: Option<String>,
-    pub decl_span: rustc_span::Span,
-}
-
-#[derive(Debug)]
-pub struct BasicBlockInfo<'tcx> {
-    pub id: BasicBlockId,
-    pub is_cleanup: bool,
-    pub successors: HashSet<BasicBlockId>,
-    pub assignment_infos: Vec<AssignmentInfo<'tcx>>,
-    pub terminator: Terminator<'tcx>,
-}
-
-#[derive(Debug)]
-pub enum OpKind {
-    Copy,
-    Move,
-    Ref,
-    AddressOf,
-}
-
-#[derive(Debug)]
-pub enum RvalKind<'tcx> {
-    Constant,
-    Addressed(Place<'tcx>),
-}
-
-#[derive(Debug)]
-pub struct AssignmentInfo<'tcx> {
-    pub lvalue: Place<'tcx>,
-    pub rvalue: RvalKind<'tcx>,
-    pub span: rustc_span::Span,
-    pub op: OpKind,
-}
+use super::BasicBlockInfo;
+use super::CallInfo;
+use super::LocalInfo;
+use super::OpKind;
+use super::RvalKind;
 
 #[derive(Debug)]
 pub struct ControlFlowGraph<'tcx> {
@@ -73,14 +37,22 @@ pub struct ControlFlowGraph<'tcx> {
     pub def_id: rustc_hir::def_id::DefId,
     pub local_infos: HashMap<LocalId, LocalInfo<'tcx>>,
     pub basic_block_infos: HashMap<BasicBlockId, BasicBlockInfo<'tcx>>,
+    pub call_infos: HashMap<BasicBlockId, CallInfo<'tcx>>,
+    pub has_ret: bool,
 }
 
 impl<'tcx> ControlFlowGraph<'tcx> {
-    pub fn new(opts: &AnalysisOptions, tcx: rustc_middle::ty::TyCtxt<'tcx>, def_id: rustc_hir::def_id::DefId) -> Self {
+    pub fn new(
+        opts: &AnalysisOptions,
+        tcx: rustc_middle::ty::TyCtxt<'tcx>,
+        def_id: rustc_hir::def_id::DefId,
+    ) -> Self {
         let body: &rustc_middle::mir::Body = tcx.optimized_mir(def_id);
         if utils::has_dbg(opts, "body") {
             log::debug!("body of def id {:?}: \n{:#?}", def_id, body);
         }
+
+        let has_ret = !body.local_decls.iter().next().unwrap().ty.is_unit();
 
         let local_infos = body
             .local_decls
@@ -99,30 +71,74 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             })
             .collect::<HashMap<_, _>>();
 
+        let call_infos = body
+            .basic_blocks()
+            .iter_enumerated()
+            .map(|(bb, bb_data)| {
+                let terminator = bb_data.terminator.as_ref().unwrap();
+                if let TerminatorKind::Call {
+                    ref func,
+                    ref args,
+                    ref destination,
+                    ..
+                } = &terminator.kind
+                {
+                    // match func {
+                    //     Operand::Copy(_) => {log::debug!("func is copy: {:#?}", func)},
+                    //     Operand::Move(_) => {log::debug!("func is move: {:#?}", func)},
+                    //     Operand::Constant(_) => {log::debug!("func is constant: {:#?}", func)},
+                    // };
+
+                    if let Operand::Constant(ref constant) = func {
+                        // log::debug!("call ty kind of func {:?}: {}", func, get_ty_kind_name(constant.literal.ty().kind()));
+
+                        if let ty::FnDef(ref target_id, ..) = constant.literal.ty().kind() {
+                            // if tcx.is_mir_available(*target_id) {
+                            if utils::has_dbg(opts, "callee") {
+                                log::debug!("mir available callee def id: {:?}", target_id);
+                                // let target_body = tcx.optimized_mir(*target_id);
+                                // log::debug!("target body: {:#?}", target_body);
+                            }
+                            let callee_def_id = *target_id;
+                            let call_info = CallInfo::new(
+                                callee_def_id,
+                                bb,
+                                func.clone(),
+                                args.clone(),
+                                destination.clone(),
+                            );
+                            return Some((bb, call_info));
+                            // }
+                        }
+                    }
+                }
+                return None;
+            })
+            .flatten()
+            .collect::<HashMap<BasicBlockId, CallInfo>>();
+
         let basic_block_infos = body
             .basic_blocks()
             .iter_enumerated()
             .map(|(bb, bb_data)| {
                 let successors =
-                    get_basic_block_successors(&bb_data.terminator.as_ref().unwrap().kind);
+                    get_basic_block_successors(&opts, &bb_data.terminator.as_ref().unwrap().kind);
 
                 let assignment_infos: Vec<AssignmentInfo> = bb_data
                     .statements
                     .iter()
-                    .map(|stat| {
-                        match stat.kind {
-                            StatementKind::Assign(ref assign) => {
-                                if utils::has_dbg(opts, "assign") {
-                                    log::debug!("statement: {:?}", stat);
-                                    log::debug!("assign: {}", get_rvalue_name(&assign.1));
-                                    log::debug!("");
-                                }
-                                get_assignment_infos(assign, stat.source_info.span)
+                    .map(|stat| match stat.kind {
+                        StatementKind::Assign(ref assign) => {
+                            if utils::has_dbg(opts, "assign") {
+                                log::debug!("statement: {:?}", stat);
+                                log::debug!("assign: {}", get_rvalue_name(&assign.1));
+                                log::debug!("");
                             }
-                            _ => {
-                                log::debug!("ignored non-assign statement: {:?}", stat);
-                                vec![]
-                            }
+                            get_assignment_infos(assign, stat.source_info.span)
+                        }
+                        _ => {
+                            log::debug!("ignored non-assign statement: {:?}", stat);
+                            vec![]
                         }
                     })
                     .flatten()
@@ -144,50 +160,16 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             def_id,
             local_infos,
             basic_block_infos,
+            call_infos,
+            has_ret,
         }
     }
 }
 
-impl<'tcx> LocalInfo<'tcx> {
-    pub fn new(
-        id: LocalId,
-        need_drop: bool,
-        ty: rustc_middle::ty::Ty<'tcx>,
-        field_info: Option<FieldInfo>,
-        var_name: Option<String>,
-        decl_span: rustc_span::Span,
-    ) -> Self {
-        Self {
-            id,
-            need_drop,
-            ty,
-            alias: Vec::default(),
-            field_info,
-            var_name,
-            decl_span,
-        }
-    }
-}
-
-impl<'tcx> BasicBlockInfo<'tcx> {
-    pub fn new(
-        id: rustc_middle::mir::BasicBlock,
-        is_cleanup: bool,
-        successors: std::collections::HashSet<rustc_middle::mir::BasicBlock>,
-        assignment_infos: Vec<AssignmentInfo<'tcx>>,
-        terminator: Terminator<'tcx>,
-    ) -> Self {
-        Self {
-            id,
-            is_cleanup,
-            successors,
-            assignment_infos,
-            terminator,
-        }
-    }
-}
-
-fn get_basic_block_successors(terminator_kind: &TerminatorKind) -> HashSet<BasicBlockId> {
+fn get_basic_block_successors(
+    opts: &AnalysisOptions,
+    terminator_kind: &TerminatorKind,
+) -> HashSet<BasicBlockId> {
     match terminator_kind {
         TerminatorKind::Goto { ref target } => [*target].into_iter().collect(),
         TerminatorKind::SwitchInt { ref targets, .. } => targets
@@ -211,10 +193,23 @@ fn get_basic_block_successors(terminator_kind: &TerminatorKind) -> HashSet<Basic
             ..
         } => Some(*target).into_iter().chain(*unwind).collect(),
         TerminatorKind::Call {
+            ref func,
+            ref args,
+            ref destination,
             ref target,
             ref cleanup,
             ..
-        } => (*target).into_iter().chain(*cleanup).collect(),
+        } => {
+            if utils::has_dbg(opts, "func") {
+                log::debug!("func: {:?}", func);
+                log::debug!("args: {:?}", args);
+                log::debug!("destination: {:?}", destination);
+                log::debug!("target: {:?}", target);
+                log::debug!("cleanup: {:?}", cleanup);
+                log::debug!("");
+            }
+            (*target).into_iter().chain(*cleanup).collect()
+        }
         TerminatorKind::Assert {
             ref target,
             ref cleanup,
@@ -236,22 +231,6 @@ fn get_basic_block_successors(terminator_kind: &TerminatorKind) -> HashSet<Basic
             ref cleanup,
             ..
         } => (*destination).into_iter().chain(*cleanup).collect(),
-    }
-}
-
-impl<'tcx> AssignmentInfo<'tcx> {
-    pub fn new(
-        lvalue: Place<'tcx>,
-        rvalue: RvalKind<'tcx>,
-        span: rustc_span::Span,
-        op: OpKind,
-    ) -> Self {
-        Self {
-            lvalue,
-            rvalue,
-            span,
-            op,
-        }
     }
 }
 
@@ -279,16 +258,32 @@ fn get_place_projection_name(place: &Place<'_>) -> String {
 fn get_rvalue_name<'tcx>(rvalue: &Rvalue<'tcx>) -> String {
     match rvalue {
         Rvalue::Use(ref op) => match op {
-            Operand::Copy(ref rvalue) => format!("use copy({:?}) proj: {}", rvalue, get_place_projection_name(rvalue)),
-            Operand::Move(ref rvalue) => format!("use move({:?}) proj: {}", rvalue, get_place_projection_name(rvalue)), 
+            Operand::Copy(ref rvalue) => format!(
+                "use copy({:?}) proj: {}",
+                rvalue,
+                get_place_projection_name(rvalue)
+            ),
+            Operand::Move(ref rvalue) => format!(
+                "use move({:?}) proj: {}",
+                rvalue,
+                get_place_projection_name(rvalue)
+            ),
             Operand::Constant(ref constant) => format!("use constant {:?}", constant),
         },
         Rvalue::Repeat(ref op, ref _count) => format!("repeat({:?})", op),
         Rvalue::Ref(_, _, ref place) => format!("ref({:?})", place),
         Rvalue::Len(ref place) => format!("len({:?})", place),
         Rvalue::Cast(_, ref op, ref _ty) => match op {
-            Operand::Copy(ref rvalue) => format!("cast copy({:?}) proj: {}", rvalue, get_place_projection_name(rvalue)),             
-            Operand::Move(ref rvalue) => format!("cast move({:?}) proj: {}", rvalue, get_place_projection_name(rvalue)),            
+            Operand::Copy(ref rvalue) => format!(
+                "cast copy({:?}) proj: {}",
+                rvalue,
+                get_place_projection_name(rvalue)
+            ),
+            Operand::Move(ref rvalue) => format!(
+                "cast move({:?}) proj: {}",
+                rvalue,
+                get_place_projection_name(rvalue)
+            ),
             Operand::Constant(ref constant) => format!("cast constant {:?}", constant),
         },
         Rvalue::BinaryOp(..) => format!("binary_op"),
@@ -305,14 +300,13 @@ fn get_rvalue_name<'tcx>(rvalue: &Rvalue<'tcx>) -> String {
     }
 }
 
-
 fn get_assignment_infos<'tcx>(
     assign: &Box<(Place<'tcx>, Rvalue<'tcx>)>,
     span: Span,
 ) -> Vec<AssignmentInfo<'tcx>> {
     match assign.1 {
         Rvalue::Use(ref op) => match op {
-            // eg. _3: i32 = _2: i32, 
+            // eg. _3: i32 = _2: i32,
             Operand::Copy(ref rvalue) => {
                 vec![AssignmentInfo::new(
                     assign.0,
@@ -331,7 +325,6 @@ fn get_assignment_infos<'tcx>(
                 )]
             }
             // eg. _1 = const 1_i32, (_4.0: i32) = const 1_i32
-            // _5 = (_4.0: i32)
             Operand::Constant(ref _constant) => {
                 vec![AssignmentInfo::new(
                     assign.0,
@@ -476,5 +469,37 @@ fn get_assignment_infos<'tcx>(
             log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
             vec![]
         }
+    }
+}
+
+fn get_ty_kind_name(ty: &TyKind<'_>) -> String {
+    match ty {
+        TyKind::Adt(adt, _) => format!("adt({:?})", adt),
+        TyKind::Array(_, _) => format!("array"),
+        TyKind::Bool => format!("bool"),
+        TyKind::Char => format!("char"),
+        TyKind::Float(_) => format!("float"),
+        TyKind::FnDef(_, _) => format!("fn_def"),
+        TyKind::FnPtr(_) => format!("fn_ptr"),
+        TyKind::Foreign(_) => format!("foreign"),
+        TyKind::Int(_) => format!("int"),
+        TyKind::Never => format!("never"),
+        TyKind::Param(_) => format!("param"),
+        TyKind::Placeholder(_) => format!("placeholder"),
+        TyKind::RawPtr(_) => format!("raw_ptr"),
+        TyKind::Ref(_, _, _) => format!("ref"),
+        TyKind::Slice(_) => format!("slice"),
+        TyKind::Str => format!("str"),
+        TyKind::Tuple(_) => format!("tuple"),
+        TyKind::Uint(_) => format!("uint"),
+        TyKind::Infer(_) => format!("infer"),
+        TyKind::Error(_) => format!("error"),
+        TyKind::Closure(_, _) => format!("closure"),
+        TyKind::Generator(_, _, _) => format!("generator"),
+        TyKind::GeneratorWitness(_) => format!("generator_witness"),
+        TyKind::Dynamic(_, _) => format!("dynamic"),
+        TyKind::Projection(_) => format!("projection"),
+        TyKind::Opaque(_, _) => format!("opaque"),
+        TyKind::Bound(_, _) => format!("bound"),
     }
 }

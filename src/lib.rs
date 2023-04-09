@@ -2,7 +2,7 @@
  * @Author: Shuwen Chen
  * @Date: 2023-03-13 00:14:58
  * @Last Modified by: Shuwen Chen
- * @Last Modified time: 2023-03-14 00:12:28
+ * @Last Modified time: 2023-04-09 17:26:13
  */
 
 #![feature(rustc_private)]
@@ -17,15 +17,11 @@ extern crate rustc_interface;
 extern crate rustc_middle;
 extern crate rustc_span;
 
-pub mod core {
-    pub mod analysis;
-    pub mod cfg;
-    pub mod check;
-    pub mod utils;
-}
+pub mod core;
 
-use crate::core::utils::AnalysisOptions;
-use std::collections::HashMap;
+use crate::core::{AnalysisOptions, analysis, pfg::PointerFlowGraph};
+
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use rustc_hir::def_id::DefId;
 
@@ -57,7 +53,6 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
         queries.global_ctxt().unwrap().peek_mut().enter(|tcx| {
             let mut cfgs: HashMap<DefId, ControlFlowGraph> = HashMap::new();
             let mut entry_def_id: Option<DefId> = None;
-            let options = self.options.clone();
 
             tcx.hir().body_owners().for_each(|local_def_id| {
                 // analysis_then_check_body(tcx, local_def_id.to_def_id())
@@ -67,7 +62,7 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
                     entry_def_id = Some(def_id);
                 }
 
-                if let Some(cfg) = try_get_cfg(&options, tcx, def_id) {
+                if let Some(cfg) = try_get_cfg(&self.options, tcx, def_id) {
                     assert!(!cfgs.contains_key(&def_id));
                     cfgs.insert(def_id, cfg);
                 }
@@ -75,7 +70,17 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
 
             if let Some(entry_def_id) = entry_def_id {
                 log::debug!("entry def id: {:?}", entry_def_id);
+
+                let ctxt = analysis::AnalysisContext {
+                    options: self.options.clone(),
+                    cfgs,
+                    pfg: PointerFlowGraph::new(),
+                    reachable_call: HashSet::new(),
+                    worklist: VecDeque::new(),
+                };
+
                 // TODO: analysis from entry call
+                let ctxt = analysis::alias_analysis(ctxt, entry_def_id);
             }
         });
         rustc_driver::Compilation::Continue
@@ -117,22 +122,26 @@ fn try_get_cfg<'tcx>(opts: &AnalysisOptions, tcx: rustc_middle::ty::TyCtxt<'tcx>
 // }
 
 fn get_rustc_args() -> Vec<String> {
-    let rustc_args = std::env::args().into_iter().collect::<Vec<String>>();
+    let mut rustc_args = std::env::args().into_iter().collect::<Vec<String>>();
 
-    match get_compile_time_sysroot() {
-        Some(sysroot) => {
-            let sysroot_flag = "--sysroot";
-            if !rustc_args.iter().any(|arg| arg == sysroot_flag) {
-                rustc_args
-                    .into_iter()
-                    .chain([sysroot_flag.to_owned(), sysroot])
-                    .collect()
-            } else {
-                rustc_args
-            }
-        }
-        None => rustc_args,
+    // Get MIR code for all code related to the crate (including the dependencies and standard library)
+    let always_encode_mir = "-Zalways_encode_mir";
+    if !rustc_args.iter().any(|arg| arg == always_encode_mir) {
+        rustc_args.push(always_encode_mir.to_owned());
     }
+
+    // Add this to support analyzing no_std libraries
+    // rustc_args.push("-Clink-arg=-nostartfiles".to_owned());
+
+    // add sysroot
+    if let Some(sysroot) = get_compile_time_sysroot() {
+        let sysroot_flag = "--sysroot";
+        if !rustc_args.iter().any(|arg| arg == sysroot_flag) {
+            rustc_args.extend([sysroot_flag.to_owned(), sysroot]);
+        }
+    }
+
+    rustc_args
 }
 
 fn get_compile_time_sysroot() -> Option<String> {
