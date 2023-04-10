@@ -18,13 +18,88 @@ pub struct AnalysisOptions {
     pub debug_opts: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CallerContext {
+    pub g_bb_ids: Vec<GlobalBasicBlockId>,
+}
+
+impl CallerContext {
+    pub fn new(g_bb_ids: Vec<GlobalBasicBlockId>) -> Self {
+        CallerContext { g_bb_ids }
+    }
+
+    pub fn is_same(&self, other: &CallerContext) -> bool {
+        // log::debug!("left caller context: {:?}", self);
+        // log::debug!("right caller context: {:?}", other);
+        if self.g_bb_ids.len() != other.g_bb_ids.len() {
+            return false;
+        }
+
+        for i in 0..self.g_bb_ids.len() {
+            if self.g_bb_ids[i] != other.g_bb_ids[i] {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CtxtSenCallId {
+    pub def_id: DefId,
+    pub caller_context: CallerContext,
+}
+
+impl CtxtSenCallId {
+    pub fn new(def_id: DefId, caller_context: CallerContext) -> Self {
+        CtxtSenCallId { def_id, caller_context }
+    }
+}
+
+// #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
+// pub struct CtxtSenGlobalProjectionId {
+//     pub g_projection_id: GlobalProjectionId,
+//     pub caller_context: CallerContext,
+// }
+
+// impl CtxtSenGlobalProjectionId {
+//     pub fn new(g_projection_id: GlobalProjectionId, caller_context: CallerContext) -> Self {
+//         CtxtSenGlobalProjectionId { g_projection_id, caller_context }
+//     }
+// }
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CtxtSenSpanInfo {
+    pub def_id: DefId,
+    pub basic_block_id: BasicBlockId,
+    pub span: rustc_span::Span,
+    pub caller_context: CallerContext,
+}
+
+impl CtxtSenSpanInfo {
+    pub fn new(def_id: DefId, basic_block_id: BasicBlockId, span: rustc_span::Span, caller_context: CallerContext) -> Self {
+        CtxtSenSpanInfo { def_id, basic_block_id, span, caller_context }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub struct GlobalLocalId {
     pub def_id: DefId,
     pub local_id: LocalId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GlobalProjectionId {
+    pub g_local_id: GlobalLocalId,
+    pub projection_id: ProjectionId,
+}
 
+impl GlobalProjectionId {
+    pub fn new(g_local_id: GlobalLocalId, projection_id: ProjectionId) -> Self {
+        GlobalProjectionId { g_local_id, projection_id }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub struct GlobalBasicBlockId {
     pub def_id: DefId,
@@ -38,6 +113,7 @@ pub struct CallInfo<'tcx> {
     pub func: Operand<'tcx>,
     pub args: Vec<Operand<'tcx>>,
     pub destination: Place<'tcx>,
+    pub span: rustc_span::Span,
 }
 
 impl<'tcx> CallInfo<'tcx> {
@@ -47,6 +123,7 @@ impl<'tcx> CallInfo<'tcx> {
         func: Operand<'tcx>,
         args: Vec<Operand<'tcx>>,
         destination: Place<'tcx>,
+        span: rustc_span::Span,
     ) -> Self {
         Self {
             callee_def_id,
@@ -54,6 +131,7 @@ impl<'tcx> CallInfo<'tcx> {
             func,
             args,
             destination,
+            span,
         }
     }
 }
@@ -101,7 +179,7 @@ pub enum RvalKind<'tcx> {
 pub struct AssignmentInfo<'tcx> {
     pub lvalue: Place<'tcx>,
     pub rvalue: RvalKind<'tcx>,
-    pub span: rustc_span::Span,
+    pub stat_span: rustc_span::Span,
     pub op: OpKind,
 }
 
@@ -115,24 +193,14 @@ impl<'tcx> AssignmentInfo<'tcx> {
         Self {
             lvalue,
             rvalue,
-            span,
+            stat_span: span,
             op,
         }
     }
 }
 
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct GlobalProjectionId {
-    pub g_local_id: GlobalLocalId,
-    pub projection_id: ProjectionId,
-}
 
-impl GlobalProjectionId {
-    pub fn new(g_local_id: GlobalLocalId, projection_id: ProjectionId) -> Self {
-        GlobalProjectionId { g_local_id, projection_id }
-    }
-}
 
 
 
@@ -188,3 +256,5 @@ impl<'tcx> BasicBlockInfo<'tcx> {
         }
     }
 }
+
+

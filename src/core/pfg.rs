@@ -1,31 +1,58 @@
+use super::{CtxtSenCallId, CtxtSenSpanInfo};
 use super::{ProjectionId, GlobalProjectionId};
 
 use crate::core::{GlobalLocalId};
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{PlaceElem, Place};
 use std::collections::{HashMap, HashSet};
+use crate::core::CallerContext;
 
 use super::{GlobalBasicBlockId, LocalId};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProjectionNeighborInfo {
+    pub neighbor_id: GlobalProjectionId,
+    pub span_info: CtxtSenSpanInfo,    
+}
 
+impl ProjectionNeighborInfo {
+    pub fn new(neighbor_id: GlobalProjectionId, span_info: CtxtSenSpanInfo) -> Self {
+        ProjectionNeighborInfo { neighbor_id, span_info }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+pub struct DerefEdgeInfo {
+    pub from: GlobalProjectionId,
+    pub to: GlobalProjectionId,
+    pub is_deref: (bool, bool),
+}
+
+impl DerefEdgeInfo {
+    pub fn new(from: GlobalProjectionId, to: GlobalProjectionId, is_deref: (bool, bool)) -> Self {
+        DerefEdgeInfo { from, to, is_deref }
+    }
+}
 #[derive(Debug)]
 pub struct ProjectionNode<'tcx> {
     pub id: ProjectionId,
+    pub caller_context: CallerContext,
+
     pub projection: Vec<PlaceElem<'tcx>>,
     pub points_to: HashSet<GlobalProjectionId>, 
 
-    pub drop_positions: Vec<GlobalBasicBlockId>,
+    pub cs_drop_spans: Vec<CtxtSenSpanInfo>,
 
-    pub neighbors: HashSet<GlobalProjectionId>,
+    pub neighbors: HashMap<GlobalProjectionId, ProjectionNeighborInfo>,
 }
 
 impl<'tcx> ProjectionNode<'tcx> {
-    pub fn new(id: ProjectionId, projection: Vec<PlaceElem<'tcx>>, drop_positions: Vec<GlobalBasicBlockId>) -> Self {
-        ProjectionNode { id, projection, drop_positions, points_to: HashSet::new(), neighbors: HashSet::new() }
+    pub fn new(id: ProjectionId, projection: Vec<PlaceElem<'tcx>>, drop_spans: Vec<CtxtSenSpanInfo>, caller_context: CallerContext) -> Self {
+        ProjectionNode { id, caller_context, projection, cs_drop_spans: drop_spans, points_to: HashSet::new(), neighbors: HashMap::new() }
     }
 
-    pub fn add_neighbor(&mut self, neighbor: GlobalProjectionId) {
-        self.neighbors.insert(neighbor);
+    pub fn add_neighbor(&mut self, neighbor: ProjectionNeighborInfo) {
+        self.neighbors.insert(neighbor.neighbor_id, neighbor);
     }
 
 
@@ -57,8 +84,8 @@ impl<'tcx> ProjectionNode<'tcx> {
         true
     }
 
-    pub fn add_drop_position(&mut self, drop_pos: GlobalBasicBlockId) {
-        self.drop_positions.push(drop_pos);
+    pub fn add_drop_span(&mut self, drop_span: CtxtSenSpanInfo) {
+        self.cs_drop_spans.push(drop_span);
     }
 
 }
@@ -84,9 +111,9 @@ impl<'tcx> PfgNode<'tcx> {
         None
     }
 
-    pub fn try_get_projection_id(&self, proj: &Vec<PlaceElem<'tcx>>) -> Option<ProjectionId> {
+    pub fn try_get_projection_id(&self, proj: &Vec<PlaceElem<'tcx>>, caller_context: CallerContext) -> Option<ProjectionId> {
         for (id, node) in self.projection_nodes.iter() {
-            if node.is_same_projection(proj) {
+            if node.is_same_projection(proj) && node.caller_context == caller_context {
                 return Some(*id);
             }
         }
@@ -105,9 +132,9 @@ impl<'tcx> PfgNode<'tcx> {
         false
     }
 
-    pub fn add_projection(&mut self, proj: Vec<PlaceElem<'tcx>>) -> ProjectionId {
+    pub fn add_projection(&mut self, proj: Vec<PlaceElem<'tcx>>, caller_context: CallerContext) -> ProjectionId {
         let id = self.projection_nodes.len() as ProjectionId;
-        let node = ProjectionNode::new(id, proj, vec![]);
+        let node = ProjectionNode::new(id, proj, vec![], caller_context);
         self.projection_nodes.insert(id, node);
         id
     }
@@ -116,33 +143,41 @@ impl<'tcx> PfgNode<'tcx> {
 #[derive(Debug)]
 pub struct PointerFlowGraph<'tcx> {
     pub nodes: HashMap<GlobalLocalId, PfgNode<'tcx>>,
+    pub deref_edges: HashSet<DerefEdgeInfo>,
 }
 
 impl<'tcx> PointerFlowGraph<'tcx> {
     pub fn new() -> Self {
-        PointerFlowGraph { nodes: HashMap::new() }
+        PointerFlowGraph { nodes: HashMap::new(), deref_edges: HashSet::new() }
+    }
+
+    pub fn get_neighbor_info(&self, from: GlobalProjectionId, to: GlobalProjectionId) -> &ProjectionNeighborInfo {
+        let from_node = self.get_projection_node(from);
+        from_node.neighbors.get(&to).unwrap()
     }
 
 
-    pub fn add_or_update_node(&mut self, def_id: DefId, place: &Place<'tcx>, drop_pos: Option<GlobalBasicBlockId>) -> GlobalProjectionId {
+    pub fn add_or_update_node(&mut self, call_id: &CtxtSenCallId, place: &Place<'tcx>, drop_span: Option<CtxtSenSpanInfo>) -> GlobalProjectionId {
+        // add or update pfg node
         let local_id: LocalId = place.local;
-        let g_local_id = GlobalLocalId { def_id, local_id };
+        let g_local_id = GlobalLocalId { def_id: call_id.def_id, local_id };
         if !self.nodes.contains_key(&g_local_id) {
             self.nodes.insert(g_local_id, PfgNode::new(g_local_id));
         }
-
         let node = self.nodes.get_mut(&g_local_id).unwrap();
 
+        // add or update projection node
         let projection = place.projection.to_vec();
         
-        let proj_id = match node.try_get_projection_id(&projection) {
+        let proj_id: ProjectionId = match node.try_get_projection_id(&projection, call_id.caller_context.clone()) {
             Some(id) => id,
-            None => node.add_projection(projection.clone()),
+            None => node.add_projection(projection.clone(), call_id.caller_context.clone()),
         };
 
+        // add drop span in this context
         let proj_node = node.projection_nodes.get_mut(&proj_id).unwrap();
-        if let Some(drop_pos) = drop_pos {
-            proj_node.add_drop_position(drop_pos);
+        if let Some(drop_span) = drop_span {
+            proj_node.add_drop_span(drop_span);
         }
 
         GlobalProjectionId::new(g_local_id, proj_id)
@@ -178,7 +213,7 @@ impl<'tcx> PointerFlowGraph<'tcx> {
         let from_node = self.nodes.get(&from.g_local_id).unwrap();
         let from_node = from_node.projection_nodes.get(&from.projection_id).unwrap();
 
-        from_node.neighbors.contains(&to)
+        from_node.neighbors.contains_key(&to)
     }
 
     pub fn has_global_local(&self, g_local_id: GlobalLocalId) -> bool {
@@ -194,10 +229,20 @@ impl<'tcx> PointerFlowGraph<'tcx> {
         node.projection_nodes.contains_key(&g_proj_id.projection_id)
     }
 
-    pub fn add_edge(&mut self, from: GlobalProjectionId, to: GlobalProjectionId) {
-        let from_node = self.nodes.get_mut(&from.g_local_id).unwrap();
-        let from_node = from_node.projection_nodes.get_mut(&from.projection_id).unwrap();
-        from_node.add_neighbor(to);
+    pub fn add_edge(&mut self, from: GlobalProjectionId, to: GlobalProjectionId, span_info: CtxtSenSpanInfo) {
+        let from_node = self.get_projection_node_mut(from);
+        from_node.add_neighbor(ProjectionNeighborInfo::new(to, span_info));
+
+        // add deref edge 
+        let from_node = self.get_projection_node(from);
+        let to_node = self.get_projection_node(to);
+
+        let from_is_deref = from_node.projection.contains(&PlaceElem::Deref);
+        let to_is_deref = to_node.projection.contains(&PlaceElem::Deref);
+
+        if from_is_deref || to_is_deref {
+            self.deref_edges.insert(DerefEdgeInfo::new(from, to, (from_is_deref, to_is_deref)));
+        }
     }
 
 }

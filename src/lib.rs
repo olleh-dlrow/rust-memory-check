@@ -1,10 +1,3 @@
-/*
- * @Author: Shuwen Chen
- * @Date: 2023-03-13 00:14:58
- * @Last Modified by: Shuwen Chen
- * @Last Modified time: 2023-04-09 17:26:13
- */
-
 #![feature(rustc_private)]
 #![feature(box_patterns)]
 #![feature(allocator_api)]
@@ -19,7 +12,7 @@ extern crate rustc_span;
 
 pub mod core;
 
-use crate::core::{AnalysisOptions, analysis, pfg::PointerFlowGraph};
+use crate::core::{AnalysisOptions, analysis, pfg::PointerFlowGraph, CtxtSenCallId, CallerContext};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -73,14 +66,15 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
 
                 let ctxt = analysis::AnalysisContext {
                     options: self.options.clone(),
+                    tcx,
                     cfgs,
                     pfg: PointerFlowGraph::new(),
-                    reachable_call: HashSet::new(),
+                    cs_reachable_calls: HashSet::new(),
                     worklist: VecDeque::new(),
                 };
 
                 // TODO: analysis from entry call
-                let ctxt = analysis::alias_analysis(ctxt, entry_def_id);
+                let ctxt = analysis::alias_analysis(ctxt, CtxtSenCallId::new(entry_def_id, CallerContext::new(vec![])));
             }
         });
         rustc_driver::Compilation::Continue

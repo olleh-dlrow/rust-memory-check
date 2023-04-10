@@ -1,10 +1,4 @@
-/*
- * @Author: Shuwen Chen
- * @Date: 2023-03-13 00:35:32
- * @Last Modified by: Shuwen Chen
- * @Last Modified time: 2023-03-13 20:04:01
- */
-use std::{io::Write};
+use std::io::Write;
 
 use crate::core::AnalysisOptions;
 
@@ -92,4 +86,18 @@ pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
     (AnalysisOptions { debug_opts }, new_args)
 }
 
-
+pub fn get_ty_from_place<'tcx>(
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    def_id: rustc_hir::def_id::DefId,
+    place: &rustc_middle::mir::Place<'tcx>,
+) -> rustc_middle::ty::Ty<'tcx> {
+    let body = tcx.optimized_mir(def_id);
+    let place_ty = place.ty(&body.local_decls, tcx);
+    if place_ty.variant_index.is_some() {
+        log::debug!(
+            "unhandled PlaceTy::variant_index: {:?}",
+            place_ty.variant_index
+        );
+    }
+    place_ty.ty
+}

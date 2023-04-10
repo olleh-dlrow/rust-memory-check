@@ -1,9 +1,3 @@
-/*
- * @Author: Shuwen Chen 
- * @Date: 2023-03-12 16:43:53 
- * @Last Modified by: Shuwen Chen
- * @Last Modified time: 2023-03-12 17:02:08
- */
 use serde_json;
 use std::ffi::OsString;
 use std::path::Path;

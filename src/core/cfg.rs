@@ -1,10 +1,3 @@
-/*
- * @Author: Shuwen Chen
- * @Date: 2023-03-13 02:23:14
- * @Last Modified by: Shuwen Chen
- * @Last Modified time: 2023-04-09 17:53:36
- */
-
 use rustc_middle::mir::terminator::TerminatorKind;
 use rustc_middle::mir::Operand;
 use rustc_middle::mir::Place;
@@ -106,6 +99,7 @@ impl<'tcx> ControlFlowGraph<'tcx> {
                                 func.clone(),
                                 args.clone(),
                                 destination.clone(),
+                                terminator.source_info.span,
                             );
                             return Some((bb, call_info));
                             // }
@@ -132,8 +126,35 @@ impl<'tcx> ControlFlowGraph<'tcx> {
                             if utils::has_dbg(opts, "assign") {
                                 log::debug!("statement: {:?}", stat);
                                 log::debug!("assign: {}", get_rvalue_name(&assign.1));
+                                // handle left place ty
+                                let left_ty = assign.0.ty(&body.local_decls, tcx).ty;
+                                log::debug!("left type: {:?}", left_ty);
+                                if left_ty.is_unsafe_ptr() || left_ty.is_ref() {
+                                    log::debug!("left is unsafe ptr or ref");
+                                }
+
+                                // handle right place ty
+                                let right_ty = assign.1.ty(&body.local_decls, tcx);
+                                log::debug!("right type: {:?}", right_ty);
+                                if right_ty.is_unsafe_ptr() || right_ty.is_ref() {
+                                    log::debug!("right is unsafe ptr or ref");
+                                }
                                 log::debug!("");
                             }
+
+                            if utils::has_dbg(opts, "span") {
+                                log::debug!("statement: {:?}", stat);
+                                let span = stat.source_info.span;
+                                log::debug!(
+                                    "statement span: lo: {:?} hi: {:?} ctxt: {:?}",
+                                    span.lo(),
+                                    span.hi(),
+                                    span.ctxt()
+                                );
+                                log::debug!("span: {:?}", span);
+                                log::debug!("");
+                            }
+
                             get_assignment_infos(assign, stat.source_info.span)
                         }
                         _ => {
