@@ -422,12 +422,16 @@ fn check_uaf(ctxt: &AnalysisContext) -> Vec<UafInfo> {
             for drop_span_info in drop_span_infos.iter() {
                 let drop_bb_id =
                     GlobalBasicBlockId::new(drop_span_info.def_id, drop_span_info.basic_block_id);
+                let deref_bb_id = GlobalBasicBlockId::new(
+                    deref_span_info.def_id,
+                    deref_span_info.basic_block_id,
+                );
                 if utils::can_basic_block_arrive(
                     &ctxt.cfgs,
                     &mut HashSet::new(),
                     drop_bb_id,
-                    GlobalBasicBlockId::new(deref_span_info.def_id, deref_span_info.basic_block_id),
-                ) {
+                    deref_bb_id,
+                ) && drop_bb_id != deref_bb_id {
                     let target_info = UafInfo::new(
                         deref_proj_id,
                         deref_span_info.clone(),

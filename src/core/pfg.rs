@@ -104,9 +104,9 @@ impl<'tcx> PfgNode<'tcx> {
         PfgNode { gid, projection_nodes: HashMap::new() }
     }
 
-    pub fn try_get_projection_node_mut(&mut self, proj: &Vec<PlaceElem<'tcx>>) -> Option<&mut ProjectionNode<'tcx>> {
+    pub fn try_get_projection_node_mut(&mut self, proj: &Vec<PlaceElem<'tcx>>, caller_context: &CallerContext) -> Option<&mut ProjectionNode<'tcx>> {
         for (_, node) in self.projection_nodes.iter_mut() {
-            if node.is_same_projection(proj) {
+            if node.is_same_projection(proj) && node.caller_context == *caller_context {
                 return Some(node);
             }
         }
@@ -114,9 +114,9 @@ impl<'tcx> PfgNode<'tcx> {
         None
     }
 
-    pub fn try_get_projection_id(&self, proj: &Vec<PlaceElem<'tcx>>, caller_context: CallerContext) -> Option<ProjectionId> {
+    pub fn try_get_projection_id(&self, proj: &Vec<PlaceElem<'tcx>>, caller_context: &CallerContext) -> Option<ProjectionId> {
         for (id, node) in self.projection_nodes.iter() {
-            if node.is_same_projection(proj) && node.caller_context == caller_context {
+            if node.is_same_projection(proj) && node.caller_context == *caller_context {
                 return Some(*id);
             }
         }
@@ -160,10 +160,9 @@ impl<'tcx> PointerFlowGraph<'tcx> {
         from_node.neighbors.get(&to).unwrap()
     }
 
-
-    pub fn add_or_update_node(&mut self, call_id: &CtxtSenCallId, place: &Place<'tcx>, drop_span: Option<CtxtSenSpanInfo>) -> GlobalProjectionId {
+    // virtual node means this node may not in the pfg, but it is a projection of a local
+    pub fn add_or_update_virtual_node(&mut self, call_id: &CtxtSenCallId, local_id: LocalId, projection: &Vec<PlaceElem<'tcx>>, drop_span: Option<CtxtSenSpanInfo>) -> GlobalProjectionId {
         // add or update pfg node
-        let local_id: LocalId = place.local;
         let g_local_id = GlobalLocalId { def_id: call_id.def_id, local_id };
         if !self.nodes.contains_key(&g_local_id) {
             self.nodes.insert(g_local_id, PfgNode::new(g_local_id));
@@ -171,9 +170,7 @@ impl<'tcx> PointerFlowGraph<'tcx> {
         let node = self.nodes.get_mut(&g_local_id).unwrap();
 
         // add or update projection node
-        let projection = place.projection.to_vec();
-        
-        let proj_id: ProjectionId = match node.try_get_projection_id(&projection, call_id.caller_context.clone()) {
+        let proj_id: ProjectionId = match node.try_get_projection_id(projection, &call_id.caller_context) {
             Some(id) => id,
             None => node.add_projection(projection.clone(), call_id.caller_context.clone()),
         };
@@ -185,6 +182,13 @@ impl<'tcx> PointerFlowGraph<'tcx> {
         }
 
         GlobalProjectionId::new(g_local_id, proj_id)
+    }
+
+    pub fn add_or_update_node(&mut self, call_id: &CtxtSenCallId, place: &Place<'tcx>, drop_span: Option<CtxtSenSpanInfo>) -> GlobalProjectionId {
+        let local_id: LocalId = place.local;
+        let projection = place.projection.to_vec();
+        
+        self.add_or_update_virtual_node(call_id, local_id, &projection, drop_span)
     }
 
     pub fn get_projection_node(&self, g_proj_id: GlobalProjectionId) -> &ProjectionNode<'tcx> {
