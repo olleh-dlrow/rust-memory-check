@@ -17,6 +17,7 @@ use colored::Colorize;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{self, Write};
 
 use rustc_hir::def_id::DefId;
 
@@ -24,16 +25,19 @@ use crate::core::{cfg::ControlFlowGraph, utils};
 
 pub fn analysis_then_check() -> Result<(), rustc_errors::ErrorGuaranteed> {
     rustc_driver::catch_fatal_errors(move || {
-        let rustc_args = get_rustc_args();
-        // log::debug!("rustc args: {:?}", rustc_args);
-        let (options, rustc_args) = utils::parse_args(&rustc_args);
 
         // behaviour like the real rustc
         if std::env::var_os("MEMORY_CHECK_BE_RUSTC").is_some() {
+            let rustc_args = get_rustc_args(true);
+            // log::debug!("rustc args: {:?}", rustc_args);
+            let (_, rustc_args) = utils::parse_args(&rustc_args);
             rustc_driver::init_rustc_env_logger();
             let mut callbacks = rustc_driver::TimePassesCallbacks::default();
             rustc_driver::RunCompiler::new(&rustc_args, &mut callbacks).run()
         } else {
+            let rustc_args = get_rustc_args(false);
+            // log::debug!("rustc args: {:?}", rustc_args);
+            let (options, rustc_args) = utils::parse_args(&rustc_args);
             if utils::open_dbg(&options) {
                 utils::init_log(log::Level::Debug).expect("init log failed");
             }
@@ -180,7 +184,7 @@ fn try_get_cfg<'tcx>(
 //     }
 // }
 
-fn get_rustc_args() -> Vec<String> {
+fn get_rustc_args(is_rustc: bool) -> Vec<String> {
     let mut rustc_args = std::env::args().into_iter().collect::<Vec<String>>();
 
     // Get MIR code for all code related to the crate (including the dependencies and standard library)
@@ -189,8 +193,12 @@ fn get_rustc_args() -> Vec<String> {
         rustc_args.push(always_encode_mir.to_owned());
     }
 
+    // WARNING!!!
+    // can't add this flag to all, because it will cause SIGSEGV: invalid memory reference
     // Add this to support analyzing no_std libraries
-    rustc_args.push("-Clink-arg=-nostartfiles".to_owned());
+    if !is_rustc {
+        rustc_args.push("-Clink-arg=-nostartfiles".to_owned());
+    }
 
     // Disable unwind to simplify the CFG
     rustc_args.push("-Cpanic=abort".to_owned());

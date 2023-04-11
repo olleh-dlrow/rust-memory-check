@@ -172,13 +172,13 @@ fn add_edge(
 /// add edge from caller arg to callee param
 /// add edge from callee return to caller receiver
 fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext {
-    let mut WL = VecDeque::new();
-    WL.push_back(entry);
+    let mut call_work_list = VecDeque::new();
+    call_work_list.push_back(entry);
 
     let mut ctxt = ctxt;
 
-    while !WL.is_empty() {
-        let caller = WL.pop_front().unwrap();
+    while !call_work_list.is_empty() {
+        let caller = call_work_list.pop_front().unwrap();
         if !ctxt.cs_reachable_calls.contains(&caller) {
             ctxt = add_reachable(ctxt, caller.clone());
 
@@ -200,7 +200,7 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
                         CtxtSenCallId::new(call_info.callee_def_id, target_context.clone());
 
                     // add callee to worklist
-                    WL.push_back(callee_id.clone());
+                    call_work_list.push_back(callee_id.clone());
 
                     // add edge from caller arg to callee parameter
                     for (i, arg) in call_info.args.iter().enumerate() {
@@ -223,6 +223,8 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
                                     );
 
                                     if arg_ty.is_unsafe_ptr() || arg_ty.is_ref() {
+                                        true
+                                    } else if arg_place.projection.contains(&PlaceElem::Deref) {
                                         true
                                     } else {
                                         log::debug!(
@@ -284,6 +286,7 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
                     }
                 } else {
                     // call is in an external crate
+                    // TODO: too much fake check result
                     // log::debug!("external crate call: {:?}", call_info.callee_def_id);
                     let dest_local_info = caller_cfg
                         .local_infos
@@ -314,6 +317,8 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
                                         );
 
                                         if arg_ty.is_unsafe_ptr() || arg_ty.is_ref() {
+                                            true
+                                        } else if arg_place.projection.contains(&PlaceElem::Deref) {
                                             true
                                         } else {
                                             log::debug!("ignored copy edge at: {:?} with arg {:?} to ret {:?}", call_info.span, arg, call_info.destination);
@@ -401,22 +406,35 @@ fn propagate(
             }
         }
 
-
         // diffuse to same level
         let mut local_wl = vec![];
         for (_, proj_node) in ctxt
             .pfg
             .get_node(cur_g_proj_id.g_local_id)
             .projection_nodes
-            .iter() {
-            if cur_proj_node.caller_context.is_same(&proj_node.caller_context) && proj_node.is_prefix_of(&cur_proj_node.projection) {
-                let suffix_projections = cur_proj_node.projection[proj_node.projection.len()..].to_vec();
+            .iter()
+        {
+            if cur_proj_node
+                .caller_context
+                .is_same(&proj_node.caller_context)
+                && proj_node.is_prefix_of(&cur_proj_node.projection)
+            {
+                let suffix_projections =
+                    cur_proj_node.projection[proj_node.projection.len()..].to_vec();
 
                 for (neighbor, _) in proj_node.neighbors.iter() {
                     let neighbor_proj_node = ctxt.pfg.get_projection_node(*neighbor);
-                    let projections = neighbor_proj_node.projection.iter().chain(suffix_projections.iter()).cloned().collect::<Vec<_>>();
-                    
-                    let call_id = CtxtSenCallId::new(neighbor.g_local_id.def_id, neighbor_proj_node.caller_context.clone());
+                    let projections = neighbor_proj_node
+                        .projection
+                        .iter()
+                        .chain(suffix_projections.iter())
+                        .cloned()
+                        .collect::<Vec<_>>();
+
+                    let call_id = CtxtSenCallId::new(
+                        neighbor.g_local_id.def_id,
+                        neighbor_proj_node.caller_context.clone(),
+                    );
 
                     local_wl.push((call_id, neighbor.g_local_id, projections, points_to.clone()));
                 }
@@ -424,7 +442,12 @@ fn propagate(
         }
 
         for (call_id, g_local_id, projections, points_to) in local_wl {
-            let virtual_node_id = ctxt.pfg.add_or_update_virtual_node(&call_id, g_local_id.local_id, &projections, None);
+            let virtual_node_id = ctxt.pfg.add_or_update_virtual_node(
+                &call_id,
+                g_local_id.local_id,
+                &projections,
+                None,
+            );
             let points_to_set = PointsTo::new(virtual_node_id, points_to.clone());
             ctxt.worklist.push_back(points_to_set);
         }
@@ -438,33 +461,31 @@ fn propagate(
         //     ctxt.worklist.push_back(points_to);
         // }
 
-/* 
-        // propagate to all neighbors, and then diffuse to all projections of the same caller context and prefix
-        for (neighbor, _) in ctxt.pfg.get_projection_node(cur_g_proj_id).neighbors.iter() {
-            let pfg_node = ctxt.pfg.get_node(neighbor.g_local_id);
-            let prefix_proj_node = ctxt.pfg.get_projection_node(*neighbor); // c': s
+        /*
+                // propagate to all neighbors, and then diffuse to all projections of the same caller context and prefix
+                for (neighbor, _) in ctxt.pfg.get_projection_node(cur_g_proj_id).neighbors.iter() {
+                    let pfg_node = ctxt.pfg.get_node(neighbor.g_local_id);
+                    let prefix_proj_node = ctxt.pfg.get_projection_node(*neighbor); // c': s
 
-            // drop will propagate to all projections of the same caller context
-            for (proj_id, proj_node) in pfg_node.projection_nodes.iter() {
-                if prefix_proj_node
-                    .caller_context
-                    .is_same(&proj_node.caller_context)
-                    && prefix_proj_node.is_prefix_of(&proj_node.projection)
-                {
-                    let points_to = PointsTo::new(
-                        GlobalProjectionId::new(neighbor.g_local_id, *proj_id),
-                        points_to.clone(),
-                    );
+                    // drop will propagate to all projections of the same caller context
+                    for (proj_id, proj_node) in pfg_node.projection_nodes.iter() {
+                        if prefix_proj_node
+                            .caller_context
+                            .is_same(&proj_node.caller_context)
+                            && prefix_proj_node.is_prefix_of(&proj_node.projection)
+                        {
+                            let points_to = PointsTo::new(
+                                GlobalProjectionId::new(neighbor.g_local_id, *proj_id),
+                                points_to.clone(),
+                            );
+                            ctxt.worklist.push_back(points_to);
+                        }
+                    }
+
+                    let points_to = PointsTo::new(*neighbor, points_to.clone());
                     ctxt.worklist.push_back(points_to);
                 }
-            }
-
-            let points_to = PointsTo::new(*neighbor, points_to.clone());
-            ctxt.worklist.push_back(points_to);
-        }
-*/
-
-
+        */
 
         ctxt
     } else {
