@@ -16,6 +16,25 @@ pub mod pfg;
 #[derive(Clone, Debug)]
 pub struct AnalysisOptions {
     pub debug_opts: Vec<String>,
+    pub entries: Vec<String>,
+    pub open_dbg: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
+pub struct DropObjectId {
+    id: GlobalProjectionId,
+}
+
+impl From<GlobalProjectionId> for DropObjectId {
+    fn from(id: GlobalProjectionId) -> Self {
+        DropObjectId { id }
+    }
+}
+
+impl Into<GlobalProjectionId> for DropObjectId {
+    fn into(self) -> GlobalProjectionId {
+        self.id
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -83,6 +102,33 @@ impl CtxtSenSpanInfo {
         CtxtSenSpanInfo { def_id, basic_block_id, span, caller_context }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+pub struct SpanInfo {
+    pub def_id: DefId,
+    pub basic_block_id: BasicBlockId,
+    pub span: rustc_span::Span,
+}
+
+impl SpanInfo {
+    pub fn new(def_id: DefId, basic_block_id: BasicBlockId, span: rustc_span::Span) -> Self {
+        SpanInfo { def_id, basic_block_id, span }
+    }
+}
+
+impl From<CtxtSenSpanInfo> for SpanInfo {
+    fn from(info: CtxtSenSpanInfo) -> Self {
+        SpanInfo::new(info.def_id, info.basic_block_id, info.span)
+    }
+}
+
+impl Into<CtxtSenSpanInfo> for SpanInfo {
+    fn into(self) -> CtxtSenSpanInfo {
+        CtxtSenSpanInfo::new(self.def_id, self.basic_block_id, self.span, CallerContext::new(vec![]))
+    }
+}
+
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub struct GlobalLocalId {
     pub def_id: DefId,
@@ -144,8 +190,6 @@ pub struct LocalInfo<'tcx> {
     pub id: LocalId,
     pub need_drop: bool,
     pub ty: rustc_middle::ty::Ty<'tcx>,
-    pub alias: Vec<LocalId>,
-    pub field_info: Option<FieldInfo>,
     pub var_name: Option<String>,
     pub decl_span: rustc_span::Span,
 }
@@ -223,7 +267,6 @@ impl<'tcx> LocalInfo<'tcx> {
         id: LocalId,
         need_drop: bool,
         ty: rustc_middle::ty::Ty<'tcx>,
-        field_info: Option<FieldInfo>,
         var_name: Option<String>,
         decl_span: rustc_span::Span,
     ) -> Self {
@@ -231,8 +274,6 @@ impl<'tcx> LocalInfo<'tcx> {
             id,
             need_drop,
             ty,
-            alias: Vec::default(),
-            field_info,
             var_name,
             decl_span,
         }

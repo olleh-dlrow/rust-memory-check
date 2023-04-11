@@ -131,6 +131,8 @@ fn main() {
     } else if let Some("rustc") = std::env::args().nth(1).as_ref().map(AsRef::as_ref) {
         // This arm is executed when `cargo-mc` runs `cargo rustc` with the `RUSTC_WRAPPER` env var set to itself:
         // dependencies get dispatched to `rustc`, the final library/binary to `mc`.
+
+        // walk this branch
         inside_cargo_rustc();
     } else {
         show_error(

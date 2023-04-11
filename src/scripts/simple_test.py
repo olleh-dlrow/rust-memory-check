@@ -18,8 +18,8 @@ if os.system(f"cargo run --bin mc {sample_file}"):
     print_err(f"check sample {sample_file} failed.")
     exit(-1)
 
-# target_crate = "~/dev/rust_project/rand/Cargo.toml"
-target_crate = "~/dev/static_analysis/rust/examples/use_after_free/RUSTSEC-2021-0130/Cargo.toml"
+target_crate = "~/dev/rust_project/rand/Cargo.toml"
+# target_crate = "~/dev/static_analysis/rust/examples/use_after_free/RUSTSEC-2021-0130/Cargo.toml"
 print(f"check target {target_crate}...")
 os.system(f"cargo clean --manifest-path {target_crate}")
 if os.system(f"cargo mc --manifest-path {target_crate}"):

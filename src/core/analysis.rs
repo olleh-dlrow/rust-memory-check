@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use super::pfg::{PointerFlowGraph, ProjectionNode};
 use super::{
     AnalysisOptions, CallerContext, CtxtSenCallId, CtxtSenSpanInfo, GlobalBasicBlockId,
-    GlobalProjectionId, LocalId, RvalKind,
+    GlobalProjectionId, LocalId, RvalKind, DropObjectId,
 };
 use crate::core::utils;
 use std::collections::VecDeque;
@@ -26,7 +26,9 @@ pub fn alias_analysis(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisCo
         ctxt = propagate(ctxt, pts.g_proj_id, delta);
     }
 
-    log::debug!("reachable call: {:?}", ctxt.cs_reachable_calls);
+    if utils::has_dbg(&ctxt.options, "RM") {
+        log::debug!("reachable call: {:#?}", ctxt.cs_reachable_calls);
+    }
     if utils::has_dbg(&ctxt.options, "pfg") {
         log::debug!("pfg: {:#?}", ctxt.pfg);
     }
@@ -46,11 +48,11 @@ pub struct AnalysisContext<'tcx> {
 #[derive(Debug)]
 pub struct PointsTo {
     pub g_proj_id: GlobalProjectionId,
-    pub points_to: HashSet<GlobalProjectionId>,
+    pub points_to: HashSet<DropObjectId>,
 }
 
 impl PointsTo {
-    pub fn new(g_proj_id: GlobalProjectionId, points_to: HashSet<GlobalProjectionId>) -> Self {
+    pub fn new(g_proj_id: GlobalProjectionId, points_to: HashSet<DropObjectId>) -> Self {
         PointsTo {
             g_proj_id,
             points_to,
@@ -69,6 +71,7 @@ fn add_reachable(ctxt: AnalysisContext, call_id: CtxtSenCallId) -> AnalysisConte
         ctxt.cs_reachable_calls.insert(call_id.clone());
 
         for (bb_id, bb_info) in cfg.basic_block_infos.iter() {
+            // handle drop object
             if let TerminatorKind::Drop { ref place, .. } = bb_info.terminator.kind {
                 let span = bb_info.terminator.source_info.span;
 
@@ -85,7 +88,8 @@ fn add_reachable(ctxt: AnalysisContext, call_id: CtxtSenCallId) -> AnalysisConte
 
                 // we assume that all drops of this place **in this context** refer to the same object, so we only add <c: x, {c: oi}> to WL once
                 if ctxt.pfg.get_projection_node(g_proj_id).cs_drop_spans.len() == 1 {
-                    let points_to = PointsTo::new(g_proj_id, Some(g_proj_id).into_iter().collect());
+                    let drop_object_id: DropObjectId = g_proj_id.into();
+                    let points_to = PointsTo::new(g_proj_id, Some(drop_object_id).into_iter().collect());
                     ctxt.worklist.push_back(points_to);
                 }
             }
@@ -350,7 +354,7 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
 fn propagate(
     ctxt: AnalysisContext,
     g_proj_id: GlobalProjectionId,
-    points_to: HashSet<GlobalProjectionId>,
+    points_to: HashSet<DropObjectId>,
 ) -> AnalysisContext {
     if !points_to.is_empty() {
         let mut ctxt = ctxt;
@@ -359,16 +363,23 @@ fn propagate(
         let proj_node = ctxt.pfg.get_projection_node_mut(g_proj_id);
         proj_node.points_to.extend(points_to.clone());
 
+
+        // add multi drop object
+        if !proj_node.cs_drop_spans.is_empty() && !ctxt.pfg.multi_drop_objects.contains(&g_proj_id.into()) && ctxt.pfg.get_projection_node(g_proj_id).points_to.len() > 1 {
+            ctxt.pfg.multi_drop_objects.insert(g_proj_id.into());
+        }
+
+        // propagate to all neighbors, and then diffuse to all projections of the same caller context and prefix
         for (neighbor, _) in ctxt.pfg.get_projection_node(g_proj_id).neighbors.iter() {
             let pfg_node = ctxt.pfg.get_node(neighbor.g_local_id);
-            let suffix_proj_node = ctxt.pfg.get_projection_node(*neighbor); // c': s
+            let prefix_proj_node = ctxt.pfg.get_projection_node(*neighbor); // c': s
 
             // drop will propagate to all projections of the same caller context
             for (proj_id, proj_node) in pfg_node.projection_nodes.iter() {
-                if suffix_proj_node
+                if prefix_proj_node
                     .caller_context
                     .is_same(&proj_node.caller_context)
-                    && suffix_proj_node.is_suffix_of(&proj_node.projection)
+                    && prefix_proj_node.is_prefix_of(&proj_node.projection)
                 {
                     let points_to = PointsTo::new(
                         GlobalProjectionId::new(neighbor.g_local_id, *proj_id),

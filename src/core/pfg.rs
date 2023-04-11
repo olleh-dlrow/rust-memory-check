@@ -1,4 +1,4 @@
-use super::{CtxtSenCallId, CtxtSenSpanInfo};
+use super::{CtxtSenCallId, CtxtSenSpanInfo, DropObjectId};
 use super::{ProjectionId, GlobalProjectionId};
 
 use crate::core::{GlobalLocalId};
@@ -39,7 +39,7 @@ pub struct ProjectionNode<'tcx> {
     pub caller_context: CallerContext,
 
     pub projection: Vec<PlaceElem<'tcx>>,
-    pub points_to: HashSet<GlobalProjectionId>, 
+    pub points_to: HashSet<DropObjectId>, 
 
     pub cs_drop_spans: Vec<CtxtSenSpanInfo>,
 
@@ -52,11 +52,14 @@ impl<'tcx> ProjectionNode<'tcx> {
     }
 
     pub fn add_neighbor(&mut self, neighbor: ProjectionNeighborInfo) {
+        if self.neighbors.contains_key(&neighbor.neighbor_id) {
+            log::debug!("neighbor already exists: {:?} -> {:?}", self.id, neighbor.neighbor_id);
+        }
         self.neighbors.insert(neighbor.neighbor_id, neighbor);
     }
 
 
-    pub fn is_suffix_of(&self, proj: &Vec<PlaceElem<'tcx>>) -> bool {
+    pub fn is_prefix_of(&self, proj: &Vec<PlaceElem<'tcx>>) -> bool {
         if self.projection.len() > proj.len() {
             return false;
         }
@@ -144,11 +147,12 @@ impl<'tcx> PfgNode<'tcx> {
 pub struct PointerFlowGraph<'tcx> {
     pub nodes: HashMap<GlobalLocalId, PfgNode<'tcx>>,
     pub deref_edges: HashSet<DerefEdgeInfo>,
+    pub multi_drop_objects: HashSet<DropObjectId>,
 }
 
 impl<'tcx> PointerFlowGraph<'tcx> {
     pub fn new() -> Self {
-        PointerFlowGraph { nodes: HashMap::new(), deref_edges: HashSet::new() }
+        PointerFlowGraph { nodes: HashMap::new(), deref_edges: HashSet::new(), multi_drop_objects: HashSet::new() }
     }
 
     pub fn get_neighbor_info(&self, from: GlobalProjectionId, to: GlobalProjectionId) -> &ProjectionNeighborInfo {

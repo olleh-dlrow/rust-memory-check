@@ -1,3 +1,8 @@
+"""
+python src/scripts/cf.py examples/correctness/sample01.rs
+"""
+
+
 import os
 import sys
 if os.system("cargo build"):

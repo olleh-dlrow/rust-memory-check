@@ -1,3 +1,4 @@
+use rustc_hir::def_id::DefId;
 use rustc_middle::mir::terminator::TerminatorKind;
 use rustc_middle::mir::Operand;
 use rustc_middle::mir::Place;
@@ -45,24 +46,41 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             log::debug!("body of def id {:?}: \n{:#?}", def_id, body);
         }
 
+        if utils::has_dbg(opts, "var-debug-info") {
+            let infos = &body.var_debug_info;
+
+            for info in infos {
+                log::debug!("VarDebugInfo: {:?} {:?}", info.name, info.value);
+            }
+
+        }
+
         let has_ret = !body.local_decls.iter().next().unwrap().ty.is_unit();
 
-        let local_infos = body
+        let mut local_infos = body
             .local_decls
             .iter_enumerated()
             .map(|(local, local_decl)| {
-                // TODO: handle VarDebugInfo
                 let local_info = LocalInfo::new(
                     local,
                     local_decl.ty.needs_drop(tcx, tcx.param_env(def_id)),
                     local_decl.ty,
-                    None,
                     None,
                     local_decl.source_info.span,
                 );
                 (local, local_info)
             })
             .collect::<HashMap<_, _>>();
+
+
+        // set var debug info
+        for info in &body.var_debug_info {
+            if let rustc_middle::mir::VarDebugInfoContents::Place(ref place) = info.value {
+                if let Some(local_info) = local_infos.get_mut(&place.local) {
+                    local_info.var_name = Some(info.name.to_string());
+                }
+            }
+        }
 
         let call_infos = body
             .basic_blocks()
@@ -110,6 +128,9 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             })
             .flatten()
             .collect::<HashMap<BasicBlockId, CallInfo>>();
+
+        
+
 
         let basic_block_infos = body
             .basic_blocks()
@@ -176,6 +197,9 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             })
             .collect::<HashMap<_, _>>();
 
+
+    
+
         Self {
             options: opts.clone(),
             def_id,
@@ -185,6 +209,7 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             has_ret,
         }
     }
+
 }
 
 fn get_basic_block_successors(
@@ -373,11 +398,35 @@ fn get_assignment_infos<'tcx>(
                 OpKind::AddressOf,
             )]
         }
-        // TODO: handle assignment ShallowInitBox
-        Rvalue::ShallowInitBox(ref _op, _) => {
-            log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
-            vec![]
-        }
+        // eg. a = vec![1, 2]
+        // _6 = alloc::alloc::exchange_malloc(..), _7 = ShallowInitBox(move _6)
+        Rvalue::ShallowInitBox(ref op, _) => match op {
+            Operand::Copy(ref rvalue) => {
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Copy,
+                )]
+            }
+            Operand::Move(ref rvalue) => {
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Addressed(*rvalue),
+                    span,
+                    OpKind::Move,
+                )]
+            }
+            Operand::Constant(ref _constant) => {
+                vec![AssignmentInfo::new(
+                    assign.0,
+                    RvalKind::Constant,
+                    span,
+                    OpKind::Copy,
+                )]
+            }
+            // log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
+        },
         Rvalue::Cast(_, ref op, _) => match op {
             Operand::Copy(ref rvalue) => {
                 vec![AssignmentInfo::new(

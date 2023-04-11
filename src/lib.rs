@@ -11,8 +11,10 @@ extern crate rustc_middle;
 extern crate rustc_span;
 
 pub mod core;
-
-use crate::core::{AnalysisOptions, analysis, pfg::PointerFlowGraph, CtxtSenCallId, CallerContext};
+use crate::core::check;
+use crate::core::{analysis, pfg::PointerFlowGraph, AnalysisOptions, CallerContext, CtxtSenCallId};
+use colored::Colorize;
+use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -23,10 +25,21 @@ use crate::core::{cfg::ControlFlowGraph, utils};
 pub fn analysis_then_check() -> Result<(), rustc_errors::ErrorGuaranteed> {
     rustc_driver::catch_fatal_errors(move || {
         let rustc_args = get_rustc_args();
+        // log::debug!("rustc args: {:?}", rustc_args);
         let (options, rustc_args) = utils::parse_args(&rustc_args);
 
-        let mut callbacks = MemoryCheckCallbacks { options };
-        rustc_driver::RunCompiler::new(&rustc_args, &mut callbacks).run()
+        // behaviour like the real rustc
+        if std::env::var_os("MEMORY_CHECK_BE_RUSTC").is_some() {
+            rustc_driver::init_rustc_env_logger();
+            let mut callbacks = rustc_driver::TimePassesCallbacks::default();
+            rustc_driver::RunCompiler::new(&rustc_args, &mut callbacks).run()
+        } else {
+            if utils::open_dbg(&options) {
+                utils::init_log(log::Level::Debug).expect("init log failed");
+            }
+            let mut callbacks = MemoryCheckCallbacks { options };
+            rustc_driver::RunCompiler::new(&rustc_args, &mut callbacks).run()
+        }
     })
     .and_then(|result| result)
 }
@@ -45,15 +58,10 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
 
         queries.global_ctxt().unwrap().peek_mut().enter(|tcx| {
             let mut cfgs: HashMap<DefId, ControlFlowGraph> = HashMap::new();
-            let mut entry_def_id: Option<DefId> = None;
 
+            // create control flow graphs
             tcx.hir().body_owners().for_each(|local_def_id| {
-                // analysis_then_check_body(tcx, local_def_id.to_def_id())
                 let def_id = local_def_id.to_def_id();
-                let def_name = format!("{:?}", def_id);
-                if def_name.contains("main") {
-                    entry_def_id = Some(def_id);
-                }
 
                 if let Some(cfg) = try_get_cfg(&self.options, tcx, def_id) {
                     assert!(!cfgs.contains_key(&def_id));
@@ -61,27 +69,84 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
                 }
             });
 
-            if let Some(entry_def_id) = entry_def_id {
+            if utils::has_dbg(&self.options, "defid") {
+                let def_ids = cfgs.keys().collect::<Vec<_>>();
+                log::debug!("def ids: {:#?}", def_ids);
+            }
+
+            // auto or manual detect entries
+            let entry_def_ids = if utils::auto_detect_entries(&self.options) {
+                check::output_level_text("info", "auto detect entries");
+                utils::get_top_def_ids(&cfgs)
+            } else {
+                cfgs.keys()
+                    .filter(|def_id| utils::has_entry(&self.options, **def_id))
+                    .map(|def_id| *def_id)
+                    .collect::<Vec<_>>()
+            };
+
+            // output entries 
+            if !entry_def_ids.is_empty() {
+                check::output_level_text("info", "analysis from entries:");
+                for entry_def_id in entry_def_ids.iter() {
+                    utils::print_with_color(" - ", Color::Blue).unwrap();
+                    utils::println_with_color(&utils::parse_def_id(*entry_def_id).join("::"), Color::White).unwrap();
+                }
+            } else {
+                check::output_level_text("warning", "without entry");
+            }
+
+            // collect check infos
+            let mut check_infos = HashMap::new();
+
+            for entry_def_id in entry_def_ids.iter() {
+                 log::debug!(
+                    "entry def id: {:?} {:?}",
+                    entry_def_id.krate,
+                    entry_def_id.index
+                );
                 log::debug!("entry def id: {:?}", entry_def_id);
 
                 let ctxt = analysis::AnalysisContext {
                     options: self.options.clone(),
                     tcx,
-                    cfgs,
+                    cfgs: cfgs,
                     pfg: PointerFlowGraph::new(),
                     cs_reachable_calls: HashSet::new(),
                     worklist: VecDeque::new(),
                 };
 
-                // TODO: analysis from entry call
-                let ctxt = analysis::alias_analysis(ctxt, CtxtSenCallId::new(entry_def_id, CallerContext::new(vec![])));
+                let ctxt = analysis::alias_analysis(
+                    ctxt,
+                    CtxtSenCallId::new(*entry_def_id, CallerContext::new(vec![])),
+                );
+
+                let check_info = check::check_memory_bug(&ctxt);
+
+
+                cfgs = ctxt.cfgs;
+
+                check_infos.insert(*entry_def_id, check_info);
             }
+
+
+            // TODO: merge check result                
+            // TODO: set output upper limit
+            let check_result = check::merge_check_info(&cfgs, &check_infos);
+            if utils::has_dbg(&self.options, "check-result") {
+                log::debug!("check result: {:#?}", check_result);
+            }
+            check::output_check_result(&check_result);
         });
         rustc_driver::Compilation::Continue
     }
 }
 
-fn try_get_cfg<'tcx>(opts: &AnalysisOptions, tcx: rustc_middle::ty::TyCtxt<'tcx>, def_id: DefId) -> Option<ControlFlowGraph<'tcx>> {
+fn try_get_cfg<'tcx>(
+    opts: &AnalysisOptions,
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    def_id: DefId,
+) -> Option<ControlFlowGraph<'tcx>> {
     if let Some(other) = tcx.hir().body_const_context(def_id.expect_local()) {
         log::debug!("ignore const context of def id {:?}: {:?}", def_id, other);
         return None;
@@ -125,7 +190,10 @@ fn get_rustc_args() -> Vec<String> {
     }
 
     // Add this to support analyzing no_std libraries
-    // rustc_args.push("-Clink-arg=-nostartfiles".to_owned());
+    rustc_args.push("-Clink-arg=-nostartfiles".to_owned());
+
+    // Disable unwind to simplify the CFG
+    rustc_args.push("-Cpanic=abort".to_owned());
 
     // add sysroot
     if let Some(sysroot) = get_compile_time_sysroot() {
@@ -183,5 +251,12 @@ mod tests {
 
         let (options, _) = utils::parse_args(&args);
         assert_eq!(options.debug_opts, vec!["cfg", "body"]);
+    }
+
+    #[test]
+    fn test_entry_is_suffix_of() {
+        let entry = vec!["b".to_string(), "c".to_string()];
+        let def_id = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(utils::entry_is_suffix_of(&entry, &def_id), true);
     }
 }
