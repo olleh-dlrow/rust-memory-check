@@ -76,19 +76,6 @@ impl CtxtSenCallId {
     }
 }
 
-// #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
-// pub struct CtxtSenGlobalProjectionId {
-//     pub g_projection_id: GlobalProjectionId,
-//     pub caller_context: CallerContext,
-// }
-
-// impl CtxtSenGlobalProjectionId {
-//     pub fn new(g_projection_id: GlobalProjectionId, caller_context: CallerContext) -> Self {
-//         CtxtSenGlobalProjectionId { g_projection_id, caller_context }
-//     }
-// }
-
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CtxtSenSpanInfo {
     pub def_id: DefId,

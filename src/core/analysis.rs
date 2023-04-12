@@ -1,13 +1,12 @@
 use crate::core::cfg::ControlFlowGraph;
 use crate::core::OpKind;
-use crate::core::{CallInfo, GlobalLocalId};
+use crate::core::{CallInfo};
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::Operand;
 use rustc_middle::mir::TerminatorKind;
 use rustc_middle::mir::{Place, PlaceElem};
 use std::collections::{HashMap, HashSet};
-
-use super::pfg::{PointerFlowGraph, ProjectionNode};
+use super::pfg::{PointerFlowGraph};
 use super::{
     AnalysisOptions, CallerContext, CtxtSenCallId, CtxtSenSpanInfo, DropObjectId,
     GlobalBasicBlockId, GlobalProjectionId, LocalId, RvalKind,
@@ -31,6 +30,25 @@ pub fn alias_analysis(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisCo
     }
     if utils::has_dbg(&ctxt.options, "pfg") {
         log::debug!("pfg: {:#?}", ctxt.pfg);
+    }
+
+    if utils::has_dbg(&ctxt.options, "pfgid") {
+        ctxt.pfg.debug_proj(|proj_node| {
+            log::debug!("projection: {:#?}", proj_node.projection);
+            log::debug!("points to: {:#?}", proj_node.points_to);
+            log::debug!("neighbors: {:#?}", proj_node.neighbors);
+        }, |def_name| {
+            def_name.ends_with("as_mut_ptr")
+        }, |_local_id| {
+            // local_id.as_usize() == 1
+            true
+        }, |_global_proj_id| {
+            true
+        });
+    }
+
+    if utils::has_dbg(&ctxt.options, "pfg-paths") {
+        ctxt.pfg.debug_paths(("main".to_owned(), LocalId::from_usize(1), 0));
     }
 
     ctxt
@@ -95,27 +113,16 @@ fn add_reachable(ctxt: AnalysisContext, call_id: CtxtSenCallId) -> AnalysisConte
                 }
             }
 
+            // handle assignment
             for assignment in bb_info.assignment_infos.iter() {
                 if let RvalKind::Addressed(place) = &assignment.rvalue {
                     let need_add_edge = match assignment.op {
                         OpKind::Move | OpKind::Ref | OpKind::AddressOf => true,
                         OpKind::Copy => {
-                            let body = ctxt.tcx.optimized_mir(call_id.def_id);
-                            let right_place_ty = place.ty(&body.local_decls, ctxt.tcx);
-                            if right_place_ty.variant_index.is_some() {
-                                log::debug!(
-                                    "unhandled PlaceTy::variant_index: {:?}",
-                                    right_place_ty.variant_index
-                                );
-                            }
-
-                            if right_place_ty.ty.is_unsafe_ptr() || right_place_ty.ty.is_ref() {
-                                true
-                            } else if place.projection.contains(&PlaceElem::Deref) {
+                            if is_ptr_copy(ctxt.tcx, call_id.def_id, place) {
                                 true
                             } else {
                                 log::debug!("ignored copy edge at: {:?} with op, lval, rval: {:?} {:?} {:?}", assignment.stat_span, assignment.op, assignment.lvalue, assignment.rvalue);
-                                log::debug!("right_place_ty.ty: {:?}", right_place_ty.ty);
                                 false
                             }
                         }
@@ -135,7 +142,7 @@ fn add_reachable(ctxt: AnalysisContext, call_id: CtxtSenCallId) -> AnalysisConte
                                 call_id.def_id,
                                 *bb_id,
                                 assignment.stat_span,
-                                call_id.caller_context.clone(),
+                                CallerContext::new(vec![]),
                             ),
                         );
                     }
@@ -154,6 +161,7 @@ fn add_edge(
     to: GlobalProjectionId,
     span_info: CtxtSenSpanInfo,
 ) {
+    assert!(span_info.caller_context.g_bb_ids.is_empty());
     if pfg.has_edge(from, to) {
         return;
     } else {
@@ -179,176 +187,80 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
 
     while !call_work_list.is_empty() {
         let caller = call_work_list.pop_front().unwrap();
+
         if !ctxt.cs_reachable_calls.contains(&caller) {
+            // add caller with context to reachable calls
             ctxt = add_reachable(ctxt, caller.clone());
 
+            // TODO: ensure all callee cfgs are in cfgs
+            // let mut new_cfg_list = vec![];
+            // for (_, call_info) in ctxt.cfgs.get(&caller.def_id).unwrap().call_infos.iter() {
+            //     // if callee is not in cfgs, we need to create it
+            //     if !ctxt.cfgs.contains_key(&call_info.callee_def_id) {
+            //         let def_name = utils::parse_def_id(call_info.callee_def_id).join("::");
+            //         // we ignore the CHA of some common pointer related functions
+            //         if ARG_TO_RET_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
+            //             continue;
+            //         }
+            //         // we ignore the edge of some clone functions
+            //         if IGNORE_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
+            //             continue;
+            //         }
+
+            //         if let Some(callee_cfg) =
+            //             cfg::try_create_cfg(&ctxt.options, ctxt.tcx, call_info.callee_def_id, false)
+            //         {
+            //             new_cfg_list.push(callee_cfg);
+            //         }
+            //     }
+            // }
+            // ctxt.cfgs
+            //     .extend(new_cfg_list.into_iter().map(|cfg| (cfg.def_id, cfg)));
+
+            // add edges from caller args to callee params
             let caller_cfg = ctxt.cfgs.get(&caller.def_id).unwrap();
             for (bb_id, call_info) in caller_cfg.call_infos.iter() {
-                // select target context
-                let target_context =
-                    CallerContext::new(vec![GlobalBasicBlockId::new(caller.def_id, *bb_id)]);
-
-                let span_info = CtxtSenSpanInfo::new(
-                    caller.def_id,
-                    *bb_id,
-                    call_info.span,
-                    CallerContext::new(vec![]),
-                );
-                // call is in the local crate
                 if ctxt.cfgs.contains_key(&call_info.callee_def_id) {
+                    // select target context
+                    let target_context =
+                        CallerContext::new(vec![GlobalBasicBlockId::new(caller.def_id, *bb_id)]);
                     let callee_id =
                         CtxtSenCallId::new(call_info.callee_def_id, target_context.clone());
 
                     // add callee to worklist
                     call_work_list.push_back(callee_id.clone());
 
-                    // add edge from caller arg to callee parameter
-                    for (i, arg) in call_info.args.iter().enumerate() {
-                        let i = i + 1;
-
-                        let arg_place = match arg {
-                            Operand::Move(ref place) => Some(place),
-                            Operand::Copy(ref place) => Some(place),
-                            Operand::Constant(_) => None,
-                        };
-
-                        if let Some(arg_place) = arg_place {
-                            let need_add_edge = match arg {
-                                Operand::Move(_) => true,
-                                Operand::Copy(_) => {
-                                    let arg_ty = utils::get_ty_from_place(
-                                        ctxt.tcx,
-                                        caller.def_id,
-                                        arg_place,
-                                    );
-
-                                    if arg_ty.is_unsafe_ptr() || arg_ty.is_ref() {
-                                        true
-                                    } else if arg_place.projection.contains(&PlaceElem::Deref) {
-                                        true
-                                    } else {
-                                        log::debug!(
-                                            "ignored copy edge at: {:?} with arg {:?}",
-                                            call_info.span,
-                                            arg
-                                        );
-                                        false
-                                    }
-                                }
-                                Operand::Constant(_) => false,
-                            };
-                            if need_add_edge {
-                                let arg_id = ctxt.pfg.add_or_update_node(&caller, arg_place, None);
-                                let param_id = ctxt.pfg.add_or_update_node(
-                                    &callee_id,
-                                    &Place::from(LocalId::from_usize(i)),
-                                    None,
-                                );
-                                add_edge(
-                                    &mut ctxt.pfg,
-                                    &mut ctxt.worklist,
-                                    arg_id,
-                                    param_id,
-                                    span_info.clone(),
-                                );
-                            } else {
-                                log::debug!(
-                                    "ignored arg at caller {:?} callee: {:?}: {:?}",
-                                    caller,
-                                    call_info.callee_def_id,
-                                    arg
-                                );
-                            }
-                        }
-                    }
-
-                    // add edge from callee ret to caller ret
-                    let dest_local_info = caller_cfg
-                        .local_infos
-                        .get(&call_info.destination.local)
-                        .unwrap();
-                    if !dest_local_info.ty.is_unit() {
-                        let callee_ret_id = ctxt.pfg.add_or_update_node(
-                            &callee_id,
-                            &Place::from(LocalId::from_usize(0)),
-                            None,
-                        );
-                        let ret_id =
-                            ctxt.pfg
-                                .add_or_update_node(&caller, &call_info.destination, None);
-                        add_edge(
-                            &mut ctxt.pfg,
-                            &mut ctxt.worklist,
-                            callee_ret_id,
-                            ret_id,
-                            span_info.clone(),
-                        );
-                    }
+                    add_args_and_ret_edge(
+                        &mut ctxt.pfg,
+                        &mut ctxt.worklist,
+                        ctxt.tcx,
+                        caller_cfg,
+                        &caller,
+                        call_info,
+                        &target_context,
+                    );
                 } else {
-                    // call is in an external crate
-                    // TODO: too much fake check result
-                    // log::debug!("external crate call: {:?}", call_info.callee_def_id);
-                    let dest_local_info = caller_cfg
-                        .local_infos
-                        .get(&call_info.destination.local)
-                        .unwrap();
-                    // add edge from caller arg to caller ret
-                    if !dest_local_info.ty.is_unit() {
-                        let ret_id =
-                            ctxt.pfg
-                                .add_or_update_node(&caller, &call_info.destination, None);
+                    log::debug!(
+                        "external unsolved crate call: {:?} in caller {:?} bb {:?}",
+                        call_info.callee_def_id,
+                        caller.def_id,
+                        bb_id
+                    );
 
-                        // log::debug!("external crate caller ret id: {:?}", ret_id);
-                        for arg in call_info.args.iter() {
-                            let arg_place = match arg {
-                                Operand::Move(ref place) => Some(place),
-                                Operand::Copy(ref place) => Some(place),
-                                Operand::Constant(_) => None,
-                            };
-
-                            if let Some(arg_place) = arg_place {
-                                let need_add_edge = match arg {
-                                    Operand::Move(_) => true,
-                                    Operand::Copy(_) => {
-                                        let arg_ty = utils::get_ty_from_place(
-                                            ctxt.tcx,
-                                            caller.def_id,
-                                            arg_place,
-                                        );
-
-                                        if arg_ty.is_unsafe_ptr() || arg_ty.is_ref() {
-                                            true
-                                        } else if arg_place.projection.contains(&PlaceElem::Deref) {
-                                            true
-                                        } else {
-                                            log::debug!("ignored copy edge at: {:?} with arg {:?} to ret {:?}", call_info.span, arg, call_info.destination);
-                                            false
-                                        }
-                                    }
-                                    Operand::Constant(_) => false,
-                                };
-                                if need_add_edge {
-                                    let arg_id =
-                                        ctxt.pfg.add_or_update_node(&caller, arg_place, None);
-
-                                    add_edge(
-                                        &mut ctxt.pfg,
-                                        &mut ctxt.worklist,
-                                        arg_id,
-                                        ret_id,
-                                        span_info.clone(),
-                                    );
-                                } else {
-                                    log::debug!(
-                                        "ignored arg at caller {:?} callee: {:?}: {:?}",
-                                        caller,
-                                        call_info.callee_def_id,
-                                        arg
-                                    );
-                                }
-                            }
-                        }
+                    let def_name = utils::parse_def_id(call_info.callee_def_id).join("::");
+                    // we ignore the edge of some clone functions
+                    if IGNORE_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
+                        continue;
                     }
+                    
+                    add_args_to_ret_edge(
+                        &mut ctxt.pfg,
+                        &mut ctxt.worklist,
+                        ctxt.tcx,
+                        caller_cfg,
+                        &caller,
+                        call_info,
+                    );
                 }
             }
         }
@@ -452,43 +364,205 @@ fn propagate(
             ctxt.worklist.push_back(points_to_set);
         }
 
-        // // propagate to all neighbors
-        // for (neighbor, _) in cur_proj_node.neighbors.iter() {
-        //     let points_to = PointsTo::new(
-        //         *neighbor,
-        //         points_to.clone(),
-        //     );
-        //     ctxt.worklist.push_back(points_to);
-        // }
-
-        /*
-                // propagate to all neighbors, and then diffuse to all projections of the same caller context and prefix
-                for (neighbor, _) in ctxt.pfg.get_projection_node(cur_g_proj_id).neighbors.iter() {
-                    let pfg_node = ctxt.pfg.get_node(neighbor.g_local_id);
-                    let prefix_proj_node = ctxt.pfg.get_projection_node(*neighbor); // c': s
-
-                    // drop will propagate to all projections of the same caller context
-                    for (proj_id, proj_node) in pfg_node.projection_nodes.iter() {
-                        if prefix_proj_node
-                            .caller_context
-                            .is_same(&proj_node.caller_context)
-                            && prefix_proj_node.is_prefix_of(&proj_node.projection)
-                        {
-                            let points_to = PointsTo::new(
-                                GlobalProjectionId::new(neighbor.g_local_id, *proj_id),
-                                points_to.clone(),
-                            );
-                            ctxt.worklist.push_back(points_to);
-                        }
-                    }
-
-                    let points_to = PointsTo::new(*neighbor, points_to.clone());
-                    ctxt.worklist.push_back(points_to);
-                }
-        */
-
         ctxt
     } else {
         ctxt
     }
 }
+
+fn is_ptr_copy<'tcx>(
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    def_id: DefId,
+    place: &Place<'tcx>,
+) -> bool {
+    let ty = utils::get_ty_from_place(tcx, def_id, place);
+
+    if ty.is_unsafe_ptr() || ty.is_ref() {
+        true
+    } else if place.projection.contains(&PlaceElem::Deref) {
+        true
+    } else {
+        false
+    }
+}
+
+fn add_args_and_ret_edge<'tcx>(
+    pfg: &mut PointerFlowGraph<'tcx>,
+    worklist: &mut VecDeque<PointsTo>,
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    caller_cfg: &ControlFlowGraph,
+    caller: &CtxtSenCallId,
+    call_info: &CallInfo<'tcx>,
+    target_context: &CallerContext,
+) {
+    let span_info = CtxtSenSpanInfo::new(
+        caller.def_id,
+        call_info.caller_bb_id,
+        call_info.span,
+        CallerContext::new(vec![]),
+    );
+    let callee_id = CtxtSenCallId::new(call_info.callee_def_id, target_context.clone());
+    // add edge from caller arg to callee parameter
+    for (i, arg) in call_info.args.iter().enumerate() {
+        let i = i + 1;
+
+        let arg_place = match arg {
+            Operand::Move(ref place) => Some(place),
+            Operand::Copy(ref place) => Some(place),
+            Operand::Constant(_) => None,
+        };
+
+        if let Some(arg_place) = arg_place {
+            let need_add_edge = match arg {
+                Operand::Move(_) => true,
+                Operand::Copy(_) => {
+                    if is_ptr_copy(tcx, caller.def_id, arg_place) {
+                        true
+                    } else {
+                        log::debug!(
+                            "ignored copy edge at: {:?} with arg {:?} ",
+                            call_info.span,
+                            arg
+                        );
+                        false
+                    }
+                }
+                Operand::Constant(_) => false,
+            };
+            if need_add_edge {
+                let arg_id = pfg.add_or_update_node(&caller, arg_place, None);
+                let param_id =
+                    pfg.add_or_update_node(&callee_id, &Place::from(LocalId::from_usize(i)), None);
+                add_edge(pfg, worklist, arg_id, param_id, span_info.clone());
+            } else {
+                log::debug!(
+                    "ignored arg at caller {:?} callee: {:?}: {:?}",
+                    caller,
+                    call_info.callee_def_id,
+                    arg
+                );
+            }
+        }
+    }
+
+    // add edge from callee ret to caller ret
+    let dest_local_info = caller_cfg
+        .local_infos
+        .get(&call_info.destination.local)
+        .unwrap();
+    if !dest_local_info.ty.is_unit() {
+        let callee_ret_id =
+            pfg.add_or_update_node(&callee_id, &Place::from(LocalId::from_usize(0)), None);
+        let ret_id = pfg.add_or_update_node(&caller, &call_info.destination, None);
+        add_edge(pfg, worklist, callee_ret_id, ret_id, span_info.clone());
+    }
+}
+
+fn add_args_to_ret_edge<'tcx>(
+    pfg: &mut PointerFlowGraph<'tcx>,
+    worklist: &mut VecDeque<PointsTo>,
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    caller_cfg: &ControlFlowGraph,
+    caller: &CtxtSenCallId,
+    call_info: &CallInfo<'tcx>,
+) {
+    let span_info = CtxtSenSpanInfo::new(
+        caller.def_id,
+        call_info.caller_bb_id,
+        call_info.span,
+        CallerContext::new(vec![]),
+    );
+    let dest_local_info = caller_cfg
+        .local_infos
+        .get(&call_info.destination.local)
+        .unwrap();
+    // add edge from caller arg to caller ret
+    if !dest_local_info.ty.is_unit() {
+        let ret_id = pfg.add_or_update_node(&caller, &call_info.destination, None);
+
+        // log::debug!("external crate caller ret id: {:?}", ret_id);
+        for arg in call_info.args.iter() {
+            let arg_place = match arg {
+                Operand::Move(ref place) => Some(place),
+                Operand::Copy(ref place) => Some(place),
+                Operand::Constant(_) => None,
+            };
+
+            if let Some(arg_place) = arg_place {
+                let need_add_edge = match arg {
+                    Operand::Move(_) => true,
+                    Operand::Copy(_) => {
+                        if is_ptr_copy(tcx, caller.def_id, arg_place) {
+                            true
+                        } else {
+                            log::debug!(
+                                "ignored copy edge at: {:?} with arg {:?} to ret {:?}",
+                                call_info.span,
+                                arg,
+                                call_info.destination
+                            );
+                            false
+                        }
+                    }
+                    Operand::Constant(_) => false,
+                };
+                if need_add_edge {
+                    let arg_id = pfg.add_or_update_node(&caller, arg_place, None);
+
+                    add_edge(pfg, worklist, arg_id, ret_id, span_info.clone());
+                } else {
+                    log::debug!(
+                        "ignored arg at caller {:?} callee: {:?}: {:?}",
+                        caller,
+                        call_info.callee_def_id,
+                        arg
+                    );
+                }
+            }
+        }
+    }
+}
+
+
+lazy_static! {
+
+// args directy to ret
+static ref ARG_TO_RET_DEF_NAMES: Vec<&'static str> = vec![
+    // Box
+    "from_raw",
+    "into_raw",
+    
+    // ptr
+    "as_ref",
+    "as_mut",
+    "borrow",
+    "borrow_mut",
+    "deref",
+    "deref_mut",
+    "borrow",
+    "borrow_mut",
+    "as_ptr",
+    "as_mut_ptr",
+    "from_raw_parts",
+    "as_mut_slice",
+    "as_slice",
+    "get",
+    "get_mut",
+
+    // vec
+
+    // string
+    "as_bytes",
+    "as_mut_str",
+    "as_mut_vec",
+    "as_str",
+    "as_bytes_mut",
+];
+
+// ignore defs, eg. clone()
+static ref IGNORE_DEF_NAMES: Vec<&'static str> = vec![
+    "clone",
+];
+}
+
+

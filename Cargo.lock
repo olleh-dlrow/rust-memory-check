@@ -423,6 +423,7 @@ dependencies = [
  "cargo_metadata",
  "colored",
  "itertools",
+ "lazy_static",
  "log",
  "log4rs",
  "serde_json",

@@ -33,6 +33,7 @@ pub struct ControlFlowGraph<'tcx> {
     pub basic_block_infos: HashMap<BasicBlockId, BasicBlockInfo<'tcx>>,
     pub call_infos: HashMap<BasicBlockId, CallInfo<'tcx>>,
     pub has_ret: bool,
+    pub is_local_crate: bool,
 }
 
 impl<'tcx> ControlFlowGraph<'tcx> {
@@ -40,6 +41,7 @@ impl<'tcx> ControlFlowGraph<'tcx> {
         opts: &AnalysisOptions,
         tcx: rustc_middle::ty::TyCtxt<'tcx>,
         def_id: rustc_hir::def_id::DefId,
+        is_local_crate: bool,
     ) -> Self {
         let body: &rustc_middle::mir::Body = tcx.optimized_mir(def_id);
         if utils::has_dbg(opts, "body") {
@@ -207,6 +209,7 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             basic_block_infos,
             call_infos,
             has_ret,
+            is_local_crate,
         }
     }
 
@@ -542,7 +545,33 @@ fn get_assignment_infos<'tcx>(
     }
 }
 
-fn get_ty_kind_name(ty: &TyKind<'_>) -> String {
+
+pub fn try_create_cfg<'tcx>(
+    opts: &AnalysisOptions,
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    def_id: DefId,
+    is_local_crate: bool,
+) -> Option<ControlFlowGraph<'tcx>> {
+    if is_local_crate {
+        if let Some(other) = tcx.hir().body_const_context(def_id.expect_local()) {
+            log::debug!("ignore const context of def id {:?}: {:?}", def_id, other);
+            return None;
+        }
+    }
+
+    if tcx.is_mir_available(def_id) {
+        let cfg = ControlFlowGraph::new(opts, tcx, def_id, is_local_crate);
+        if utils::has_dbg(&opts, "cfg") {
+            log::debug!("control flow graph of def id {:?}: {:#?}", def_id, cfg);
+        }
+        Some(cfg)
+    } else {
+        log::debug!("MIR is unavailable for def id {:?}", def_id);
+        None
+    }
+}
+
+fn _get_ty_kind_name(ty: &TyKind<'_>) -> String {
     match ty {
         TyKind::Adt(adt, _) => format!("adt({:?})", adt),
         TyKind::Array(_, _) => format!("array"),
@@ -573,3 +602,6 @@ fn get_ty_kind_name(ty: &TyKind<'_>) -> String {
         TyKind::Bound(_, _) => format!("bound"),
     }
 }
+
+
+

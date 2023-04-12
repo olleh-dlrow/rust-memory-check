@@ -2,8 +2,7 @@ use colored::Colorize;
 use rustc_hir::def_id::DefId;
 use rustc_span::Span;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
-use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+use termcolor::{Color};
 
 use super::cfg::ControlFlowGraph;
 use super::{CtxtSenSpanInfo, DropObjectId, GlobalBasicBlockId, GlobalProjectionId};
@@ -20,9 +19,10 @@ pub fn check_memory_bug(ctxt: &AnalysisContext) -> CheckInfo {
     check_info
 }
 
+// TODO: ensure all defids come from local
 pub fn merge_check_info(
     cfgs: &HashMap<DefId, ControlFlowGraph>,
-    check_infos: &HashMap<DefId, CheckInfo>,
+    check_infos: &HashMap<DefId, CheckInfo>,    // checkinfo entry from the key: defid
 ) -> CheckResult {
     let get_var_name = |proj_id: GlobalProjectionId| {
         let cfg = cfgs.get(&proj_id.g_local_id.def_id).unwrap();
@@ -37,6 +37,16 @@ pub fn merge_check_info(
         .map(|(_, check_info)| check_info.uaf_infos.iter())
         .flatten();
     for uaf_info in uaf_into_iter {
+        // ensure the result is in our crate
+        // if !cfgs.get(&uaf_info.deref_proj_id.g_local_id.def_id).unwrap().is_local_crate {
+        //     continue;
+        // }
+        // let drop_proj_id: GlobalProjectionId = uaf_info.drop_obj_id.into();
+        // if !cfgs.get(&drop_proj_id.g_local_id.def_id).unwrap().is_local_crate {
+        //     continue;
+        // }
+
+
         let uaf_span = UafSpan::new(uaf_info.deref_span.span, uaf_info.drop_span.span);
         let uaf_result = UafResult::new(
             uaf_info.deref_span.span,
@@ -65,6 +75,18 @@ pub fn merge_check_info(
         .map(|(_, check_info)| check_info.df_infos.iter())
         .flatten();
     for df_info in df_into_iter {
+        // ensure the result is in our crate
+        // let first_drop_proj_id: GlobalProjectionId = df_info.first_drop_obj_id.into();
+        // if !cfgs.get(&first_drop_proj_id.g_local_id.def_id).unwrap().is_local_crate {
+        //     continue;
+        // }
+
+        // let then_drop_proj_id: GlobalProjectionId = df_info.then_drop_obj_id.into();
+        // if !cfgs.get(&then_drop_proj_id.g_local_id.def_id).unwrap().is_local_crate {
+        //     continue;
+        // }
+
+        
         let df_span = DfSpan::new(df_info.first_drop_span.span, df_info.then_drop_span.span);
         let df_result = DfResult::new(
             df_info.first_drop_span.span,
@@ -133,6 +155,9 @@ pub fn output_check_result(check_result: &CheckResult) {
         };
         output_code_and_problem_info(&filename, line_range, column_range, &problem_text);
     }
+
+    let total_str = format!("total: {} uaf bugs, {} df bugs", check_result.uaf_results.len(), check_result.df_results.len());
+    output_level_text("info", &total_str);
 
 }
 
@@ -470,7 +495,7 @@ fn check_uaf(ctxt: &AnalysisContext) -> Vec<UafInfo> {
     uaf_infos
 }
 
-fn contains_same_span<T: SameSpan>(infos: &Vec<T>, target: &T) -> bool {
+fn _contains_same_span<T: SameSpan>(infos: &Vec<T>, target: &T) -> bool {
     for info in infos.iter() {
         if info.is_same_span(target) {
             return true;
@@ -650,7 +675,12 @@ pub fn output_df_infos(df_infos: &Vec<DfInfo>) {
 // \yellow$level:   \cyan(memroy\scheck)   \normal\s$text
 pub fn output_level_text(level: &str, text: &str) {
     let s = format!("{}:", level);
-    utils::print_with_color(&s, Color::Yellow).unwrap();
+    utils::print_with_color(&s, match level {
+        "info" => Color::Green,
+        "warning" => Color::Yellow,
+        "error" => Color::Red,
+        _ => Color::White,
+    }).unwrap();
     
     let s = "(memory check)";
     utils::print_with_color(&s, Color::Cyan).unwrap();

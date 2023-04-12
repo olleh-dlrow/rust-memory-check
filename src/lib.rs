@@ -1,6 +1,8 @@
 #![feature(rustc_private)]
 #![feature(box_patterns)]
 #![feature(allocator_api)]
+#[macro_use]
+extern crate lazy_static;
 
 extern crate rustc_driver;
 extern crate rustc_errors;
@@ -13,15 +15,14 @@ extern crate rustc_span;
 pub mod core;
 use crate::core::check;
 use crate::core::{analysis, pfg::PointerFlowGraph, AnalysisOptions, CallerContext, CtxtSenCallId};
-use colored::Colorize;
-use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+use termcolor::{Color};
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{self, Write};
 
 use rustc_hir::def_id::DefId;
 
 use crate::core::{cfg::ControlFlowGraph, utils};
+use crate::core::cfg;
 
 pub fn analysis_then_check() -> Result<(), rustc_errors::ErrorGuaranteed> {
     rustc_driver::catch_fatal_errors(move || {
@@ -67,7 +68,7 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
             tcx.hir().body_owners().for_each(|local_def_id| {
                 let def_id = local_def_id.to_def_id();
 
-                if let Some(cfg) = try_get_cfg(&self.options, tcx, def_id) {
+                if let Some(cfg) = cfg::try_create_cfg(&self.options, tcx, def_id, true) {
                     assert!(!cfgs.contains_key(&def_id));
                     cfgs.insert(def_id, cfg);
                 }
@@ -104,11 +105,6 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
             let mut check_infos = HashMap::new();
 
             for entry_def_id in entry_def_ids.iter() {
-                 log::debug!(
-                    "entry def id: {:?} {:?}",
-                    entry_def_id.krate,
-                    entry_def_id.index
-                );
                 log::debug!("entry def id: {:?}", entry_def_id);
 
                 let ctxt = analysis::AnalysisContext {
@@ -134,8 +130,6 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
             }
 
 
-            // TODO: merge check result                
-            // TODO: set output upper limit
             let check_result = check::merge_check_info(&cfgs, &check_infos);
             if utils::has_dbg(&self.options, "check-result") {
                 log::debug!("check result: {:#?}", check_result);
@@ -145,44 +139,6 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
         rustc_driver::Compilation::Continue
     }
 }
-
-fn try_get_cfg<'tcx>(
-    opts: &AnalysisOptions,
-    tcx: rustc_middle::ty::TyCtxt<'tcx>,
-    def_id: DefId,
-) -> Option<ControlFlowGraph<'tcx>> {
-    if let Some(other) = tcx.hir().body_const_context(def_id.expect_local()) {
-        log::debug!("ignore const context of def id {:?}: {:?}", def_id, other);
-        return None;
-    }
-
-    if tcx.is_mir_available(def_id) {
-        let cfg = ControlFlowGraph::new(opts, tcx, def_id);
-        if utils::has_dbg(&opts, "cfg") {
-            log::debug!("control flow graph of def id {:?}: {:#?}", def_id, cfg);
-        }
-        Some(cfg)
-    } else {
-        log::debug!("MIR is unavailable for def id {:?}", def_id);
-        None
-    }
-}
-
-// fn analysis_then_check_body(opts: &AnalysisOptions, tcx: rustc_middle::ty::TyCtxt, def_id: rustc_hir::def_id::DefId) {
-//     if let Some(other) = tcx.hir().body_const_context(def_id.expect_local()) {
-//         log::debug!("ignore const context of def id {:?}: {:?}", def_id, other);
-//         return;
-//     }
-
-//     if tcx.is_mir_available(def_id) {
-//         let mut cfg = ControlFlowGraph::new(opts, tcx, def_id);
-//         log::debug!("control flow graph of def id {:?}: {:#?}", def_id, cfg);
-//         crate::core::analysis::alias_analysis(&mut cfg);
-//         let _report = crate::core::check::check_then_report(&mut cfg);
-//     } else {
-//         log::debug!("MIR is unavailable for def id {:?}", def_id);
-//     }
-// }
 
 fn get_rustc_args(is_rustc: bool) -> Vec<String> {
     let mut rustc_args = std::env::args().into_iter().collect::<Vec<String>>();
