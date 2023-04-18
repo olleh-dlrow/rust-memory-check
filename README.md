@@ -64,7 +64,7 @@ cargo run --bin cargo-mc mc --manifest-path CARGO_TOML_PATH --entries [ENTRY_FUN
 
 基于别名分析和过程间分析的指针图构建
 
-基于流非敏感，上下文敏感和域敏感的数据结构分析算法的改进
+基于流非敏感，上下文敏感和域敏感的指针分析算法在Rust程序下的应用
 
 
 
