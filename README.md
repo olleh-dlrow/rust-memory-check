@@ -72,19 +72,19 @@ cargo run --bin cargo-mc mc --manifest-path CARGO_TOML_PATH --entries [ENTRY_FUN
 
 ```
 AliasAnalysis()
-	WL = []										
-	PFG = {}
-	S: set of reachable statements = {}
-	RM: set of reachable methods = {}
-	CG: call graph edges = {}
-	m^entry: entry call
+    WL = []                                        
+    PFG = {}
+    S: set of reachable statements = {}
+    RM: set of reachable methods = {}
+    CG: call graph edges = {}
+    m^entry: entry call
 
-	ProcessCalls([]: m^entry)
-	
-	while WL is not empty do
-		remove <c: n, pts> from WL
-		delta = pts - pt(c: n)
-		Propagate(c: n, delta)
+    ProcessCalls([]: m^entry)
+    
+    while WL is not empty do
+        remove <c: n, pts> from WL
+        delta = pts - pt(c: n)
+        Propagate(c: n, delta)
 ```
 
 
@@ -93,32 +93,32 @@ AliasAnalysis()
 
 ```
 ProcessCalls(c: m^entry)
-	WL = [c: m^entry]
-	RM: context sensitive reachable method = {}
-	while WL is not empty do 
-		remove m from WL
-		if c: m not in RM then
-			AddReachable(c: m)
-			
+    WL = [c: m^entry]
+    RM: context sensitive reachable method = {}
+    while WL is not empty do 
+        remove m from WL
+        if c: m not in RM then
+            AddReachable(c: m)
+            
 
            foreach l: r = cs(a1, ..., an) in c: m do
-				c^t = Select(c, l:=callsite, c':oi)
-                if cs in extern crate then		
+                c^t = Select(c, l:=callsite, c':oi)
+                if cs in extern crate then        
                     foreach parameter ai of cs do
                         if op is move or ref or addressof then 
                             AddEdge(c: ai, c: r, span)
-						elseif op is copy and project(y) is ptr or ref then
-							AddEdge(c: ai, c: r, span)
+                        elseif op is copy and project(y) is ptr or ref then
+                            AddEdge(c: ai, c: r, span)
 
-                elseif cs in local crate then		
-                	add c^t: cs to WL
-                	foreach parameter pi of cs do
-                		if op is move or ref or addressof then
-                			AddEdge(c: ai, c^t: pi, span)
-						elseif op is copy and project(y) is ptr or ref then
-							AddEdge(c: ai, c^t: pi, span)
-                		if has ret then
-                			AddEdge(c^t: cs_ret, c: r, span)
+                elseif cs in local crate then        
+                    add c^t: cs to WL
+                    foreach parameter pi of cs do
+                        if op is move or ref or addressof then
+                            AddEdge(c: ai, c^t: pi, span)
+                        elseif op is copy and project(y) is ptr or ref then
+                            AddEdge(c: ai, c^t: pi, span)
+                        if has ret then
+                            AddEdge(c^t: cs_ret, c: r, span)
 ```
 
 
@@ -127,22 +127,22 @@ ProcessCalls(c: m^entry)
 
 ```
 Propagate(c: n, pts)
-	if pts is not empty then
-		pt(c: n) union = pts
-		if c: n not in PFG.multi_drop_objs and pt(c: n) has other drop_obj(pt(c: n).len > 1) then
-			add c: n to PFG.multi_drop_objs
-		// diffuse at sub level
-		foreach c': proj in c: n.projections do
-			if c: n is the prefix of c': proj and c == c' and c: n != c': proj then	// not include itself
-				add <c': proj, pts> to WL
+    if pts is not empty then
+        pt(c: n) union = pts
+        if c: n not in PFG.multi_drop_objs and pt(c: n) has other drop_obj(pt(c: n).len > 1) then
+            add c: n to PFG.multi_drop_objs
+        // diffuse at sub level
+        foreach c': proj in c: n.projections do
+            if c: n is the prefix of c': proj and c == c' and c: n != c': proj then    // not include itself
+                add <c': proj, pts> to WL
 
-		// diffuse at same level
-		foreach c': proj in c: n.projections do
-			if c': proj in the prefix of c: n and c == c' then	// include itself
-				diff_projections = c: n.proj.value - c': proj.value
-				foreach c': proj -> c'': s in PFG do
-                	c'': t = add or update c'': s + diff_projections to PFG
-                	add <c'': t, pts> to WL			
+        // diffuse at same level
+        foreach c': proj in c: n.projections do
+            if c': proj in the prefix of c: n and c == c' then    // include itself
+                diff_projections = c: n.proj.value - c': proj.value
+                foreach c': proj -> c'': s in PFG do
+                    c'': t = add or update c'': s + diff_projections to PFG
+                    add <c'': t, pts> to WL            
 ```
 
 
