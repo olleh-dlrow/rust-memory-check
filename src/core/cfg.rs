@@ -21,6 +21,7 @@ use crate::core::AssignmentInfo;
 
 use super::BasicBlockInfo;
 use super::CallInfo;
+use super::GlobalBasicBlockId;
 use super::LocalInfo;
 use super::OpKind;
 use super::RvalKind;
@@ -32,7 +33,7 @@ pub struct ControlFlowGraph<'tcx> {
     pub local_infos: HashMap<LocalId, LocalInfo<'tcx>>,
     pub basic_block_infos: HashMap<BasicBlockId, BasicBlockInfo<'tcx>>,
     pub call_infos: HashMap<BasicBlockId, CallInfo<'tcx>>,
-    pub has_ret: bool,
+    pub ret_bbs: HashSet<BasicBlockId>,
     pub is_local_crate: bool,
 }
 
@@ -54,10 +55,7 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             for info in infos {
                 log::debug!("VarDebugInfo: {:?} {:?}", info.name, info.value);
             }
-
         }
-
-        let has_ret = !body.local_decls.iter().next().unwrap().ty.is_unit();
 
         let mut local_infos = body
             .local_decls
@@ -73,7 +71,6 @@ impl<'tcx> ControlFlowGraph<'tcx> {
                 (local, local_info)
             })
             .collect::<HashMap<_, _>>();
-
 
         // set var debug info
         for info in &body.var_debug_info {
@@ -131,8 +128,18 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             .flatten()
             .collect::<HashMap<BasicBlockId, CallInfo>>();
 
-        
-
+        let ret_bbs = body
+            .basic_blocks()
+            .iter_enumerated()
+            .map(|(bb, bb_data)| {
+                let terminator = bb_data.terminator.as_ref().unwrap();
+                if let TerminatorKind::Return = &terminator.kind {
+                    return Some(bb);
+                }
+                return None;
+            })
+            .flatten()
+            .collect::<HashSet<BasicBlockId>>();
 
         let basic_block_infos = body
             .basic_blocks()
@@ -199,20 +206,16 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             })
             .collect::<HashMap<_, _>>();
 
-
-    
-
         Self {
             options: opts.clone(),
             def_id,
             local_infos,
             basic_block_infos,
             call_infos,
-            has_ret,
+            ret_bbs,
             is_local_crate,
         }
     }
-
 }
 
 fn get_basic_block_successors(
@@ -427,8 +430,7 @@ fn get_assignment_infos<'tcx>(
                     span,
                     OpKind::Copy,
                 )]
-            }
-            // log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
+            } // log::debug!("unhandled assign: {:?} in span {:?}", assign, span);
         },
         Rvalue::Cast(_, ref op, _) => match op {
             Operand::Copy(ref rvalue) => {
@@ -545,7 +547,6 @@ fn get_assignment_infos<'tcx>(
     }
 }
 
-
 pub fn try_create_cfg<'tcx>(
     opts: &AnalysisOptions,
     tcx: rustc_middle::ty::TyCtxt<'tcx>,
@@ -570,6 +571,20 @@ pub fn try_create_cfg<'tcx>(
         None
     }
 }
+
+pub fn add_called_info(_opts: &AnalysisOptions, called_infos: &mut HashMap<DefId, HashSet<GlobalBasicBlockId>>, cfg: &ControlFlowGraph) {
+    for (bb, call_info) in cfg.call_infos.iter() {
+        if !called_infos.contains_key(&call_info.callee_def_id) {
+            called_infos.insert(call_info.callee_def_id, HashSet::new());
+        }
+        let called_info = called_infos.get_mut(&call_info.callee_def_id).unwrap();
+        
+        for successor in cfg.basic_block_infos.get(bb).unwrap().successors.iter() {
+            called_info.insert(GlobalBasicBlockId::new(cfg.def_id, *successor));
+        }
+    }
+}
+
 
 fn _get_ty_kind_name(ty: &TyKind<'_>) -> String {
     match ty {
@@ -602,6 +617,3 @@ fn _get_ty_kind_name(ty: &TyKind<'_>) -> String {
         TyKind::Bound(_, _) => format!("bound"),
     }
 }
-
-
-

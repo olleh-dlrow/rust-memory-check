@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use super::pfg::{PointerFlowGraph};
 use super::{
     AnalysisOptions, CallerContext, CtxtSenCallId, CtxtSenSpanInfo, DropObjectId,
-    GlobalBasicBlockId, GlobalProjectionId, LocalId, RvalKind,
+    GlobalBasicBlockId, GlobalProjectionId, LocalId, RvalKind
 };
 use crate::core::utils;
 use std::collections::VecDeque;
@@ -38,7 +38,7 @@ pub fn alias_analysis(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisCo
             log::debug!("points to: {:#?}", proj_node.points_to);
             log::debug!("neighbors: {:#?}", proj_node.neighbors);
         }, |def_name| {
-            def_name.ends_with("as_mut_ptr")
+            def_name.ends_with("main") || def_name.ends_with("from")
         }, |_local_id| {
             // local_id.as_usize() == 1
             true
@@ -58,6 +58,7 @@ pub struct AnalysisContext<'tcx> {
     pub options: AnalysisOptions,
     pub tcx: rustc_middle::ty::TyCtxt<'tcx>,
     pub cfgs: HashMap<DefId, ControlFlowGraph<'tcx>>,
+    pub called_infos: HashMap<DefId, HashSet<GlobalBasicBlockId>>,
     pub pfg: PointerFlowGraph<'tcx>,
     pub cs_reachable_calls: HashSet<CtxtSenCallId>,
     pub worklist: VecDeque<PointsTo>,
@@ -206,10 +207,22 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
             //         if IGNORE_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
             //             continue;
             //         }
+            //         // we ignore all standard library functions
+            //         // if def_name.starts_with("std::") {
+            //         //     continue;
+            //         // }
 
+            //         // if def_name.starts_with("core::") {
+            //         //     continue;
+            //         // }
+
+            //         // if def_name.starts_with("alloc::") {
+            //         //     continue;
+            //         // }
             //         if let Some(callee_cfg) =
             //             cfg::try_create_cfg(&ctxt.options, ctxt.tcx, call_info.callee_def_id, false)
             //         {
+            //             cfg::add_called_info(&self.options, &mut called_infos, &cfg);
             //             new_cfg_list.push(callee_cfg);
             //         }
             //     }
@@ -270,6 +283,7 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
         options: ctxt.options,
         tcx: ctxt.tcx,
         cfgs: ctxt.cfgs,
+        called_infos: ctxt.called_infos,
         pfg: ctxt.pfg,
         cs_reachable_calls: ctxt.cs_reachable_calls,
         worklist: ctxt.worklist,

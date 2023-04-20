@@ -2,7 +2,7 @@ use colored::Colorize;
 use rustc_hir::def_id::DefId;
 use rustc_span::Span;
 use std::collections::{HashMap, HashSet};
-use termcolor::{Color};
+use termcolor::Color;
 
 use super::cfg::ControlFlowGraph;
 use super::{CtxtSenSpanInfo, DropObjectId, GlobalBasicBlockId, GlobalProjectionId};
@@ -22,7 +22,7 @@ pub fn check_memory_bug(ctxt: &AnalysisContext) -> CheckInfo {
 // TODO: ensure all defids come from local
 pub fn merge_check_info(
     cfgs: &HashMap<DefId, ControlFlowGraph>,
-    check_infos: &HashMap<DefId, CheckInfo>,    // checkinfo entry from the key: defid
+    check_infos: &HashMap<DefId, CheckInfo>, // checkinfo entry from the key: defid
 ) -> CheckResult {
     let get_var_name = |proj_id: GlobalProjectionId| {
         let cfg = cfgs.get(&proj_id.g_local_id.def_id).unwrap();
@@ -46,7 +46,6 @@ pub fn merge_check_info(
         //     continue;
         // }
 
-
         let uaf_span = UafSpan::new(uaf_info.deref_span.span, uaf_info.drop_span.span);
         let uaf_result = UafResult::new(
             uaf_info.deref_span.span,
@@ -60,7 +59,9 @@ pub fn merge_check_info(
             let uaf_results_with_span = uaf_results.get_mut(&uaf_span).unwrap();
             if uaf_result.has_var_name() {
                 // the first does not have var name, pop it
-                if uaf_results_with_span.len() == 1 && !uaf_results_with_span.iter().next().unwrap().has_var_name() {
+                if uaf_results_with_span.len() == 1
+                    && !uaf_results_with_span.iter().next().unwrap().has_var_name()
+                {
                     uaf_results_with_span.clear();
                 }
                 uaf_results_with_span.insert(uaf_result);
@@ -86,7 +87,6 @@ pub fn merge_check_info(
         //     continue;
         // }
 
-        
         let df_span = DfSpan::new(df_info.first_drop_span.span, df_info.then_drop_span.span);
         let df_result = DfResult::new(
             df_info.first_drop_span.span,
@@ -100,26 +100,31 @@ pub fn merge_check_info(
             let df_results_with_span = df_results.get_mut(&df_span).unwrap();
             if df_result.has_var_name() {
                 // the first does not have var name, pop it
-                if df_results_with_span.len() == 1 && !df_results_with_span.iter().next().unwrap().has_var_name() {
+                if df_results_with_span.len() == 1
+                    && !df_results_with_span.iter().next().unwrap().has_var_name()
+                {
                     df_results_with_span.clear();
                 }
                 df_results_with_span.insert(df_result);
             }
-        }        
+        }
     }
-
 
     let mut check_result = CheckResult::new();
 
-    check_result.uaf_results = uaf_results;     
-    check_result.df_results = df_results;     
+    check_result.uaf_results = uaf_results;
+    check_result.df_results = df_results;
 
     check_result
 }
 
 pub fn output_check_result(check_result: &CheckResult) {
     // handle uaf
-    let uaf_result_iter = check_result.uaf_results.iter().map(|(_, result)| result.iter()).flatten();
+    let uaf_result_iter = check_result
+        .uaf_results
+        .iter()
+        .map(|(_, result)| result.iter())
+        .flatten();
     for uaf_result in uaf_result_iter {
         output_level_text("warning", "use after free memory bug may exists");
         let (filename, line_range, column_range) = utils::parse_span(&uaf_result.drop_span);
@@ -138,7 +143,11 @@ pub fn output_check_result(check_result: &CheckResult) {
     }
 
     // handle df
-    let df_result_iter = check_result.df_results.iter().map(|(_, result)| result.iter()).flatten();
+    let df_result_iter = check_result
+        .df_results
+        .iter()
+        .map(|(_, result)| result.iter())
+        .flatten();
     for df_result in df_result_iter {
         output_level_text("warning", "double free memory bug may exists");
         let (filename, line_range, column_range) = utils::parse_span(&df_result.first_drop_span);
@@ -156,11 +165,13 @@ pub fn output_check_result(check_result: &CheckResult) {
         output_code_and_problem_info(&filename, line_range, column_range, &problem_text);
     }
 
-    let total_str = format!("total: {} uaf bugs, {} df bugs", check_result.uaf_results.len(), check_result.df_results.len());
+    let total_str = format!(
+        "total: {} uaf bugs, {} df bugs",
+        check_result.uaf_results.len(),
+        check_result.df_results.len()
+    );
     output_level_text("info", &total_str);
-
 }
-
 
 #[derive(Debug)]
 pub struct CheckInfo {
@@ -392,6 +403,7 @@ fn check_df(ctxt: &AnalysisContext) -> Vec<DfInfo> {
                 // if first drop object can arrive then drop object, it is a double free.
                 if utils::can_basic_block_arrive(
                     &ctxt.cfgs,
+                    &ctxt.called_infos,
                     &mut HashSet::new(),
                     first_drop_bb_id,
                     then_drop_bb_id,
@@ -411,6 +423,7 @@ fn check_df(ctxt: &AnalysisContext) -> Vec<DfInfo> {
                 // if then drop object can arrive first drop object, it is a double free.
                 if utils::can_basic_block_arrive(
                     &ctxt.cfgs,
+                    &ctxt.called_infos,
                     &mut HashSet::new(),
                     then_drop_bb_id,
                     first_drop_bb_id,
@@ -447,22 +460,38 @@ fn check_uaf(ctxt: &AnalysisContext) -> Vec<UafInfo> {
             for drop_span_info in drop_span_infos.iter() {
                 let drop_bb_id =
                     GlobalBasicBlockId::new(drop_span_info.def_id, drop_span_info.basic_block_id);
-                let deref_bb_id = GlobalBasicBlockId::new(
-                    deref_span_info.def_id,
-                    deref_span_info.basic_block_id,
-                );
+                let deref_bb_id =
+                    GlobalBasicBlockId::new(deref_span_info.def_id, deref_span_info.basic_block_id);
                 if utils::can_basic_block_arrive(
                     &ctxt.cfgs,
+                    &ctxt.called_infos,
                     &mut HashSet::new(),
                     drop_bb_id,
                     deref_bb_id,
-                ) && drop_bb_id != deref_bb_id {
+                ) && drop_bb_id != deref_bb_id
+                {
                     let target_info = UafInfo::new(
                         deref_proj_id,
                         deref_span_info.clone(),
                         *drop_obj_id,
                         drop_span_info.clone(),
                     );
+
+                    if utils::has_dbg(&ctxt.options, "bug-path") {
+                        let mut bug_path: Vec<GlobalBasicBlockId> = vec![];
+                        utils::can_basic_block_arrive_with_path_record(
+                            &ctxt.cfgs,
+                            &ctxt.called_infos,
+                            &mut HashSet::new(),
+                            drop_bb_id,
+                            deref_bb_id,
+                            &mut bug_path,
+                        );
+
+                        log::debug!("bug path from drop {:?} to deref {:?}", drop_bb_id, deref_bb_id);
+                        log::debug!("from span {:?} to span {:?}", drop_span_info.span, deref_span_info.span);
+                        log::debug!("path: {:#?}", bug_path);
+                    }
 
                     // if !contains_same_span(&uaf_infos, &target_info) {
                     uaf_infos.push(target_info);
@@ -675,16 +704,20 @@ pub fn output_df_infos(df_infos: &Vec<DfInfo>) {
 // \yellow$level:   \cyan(memroy\scheck)   \normal\s$text
 pub fn output_level_text(level: &str, text: &str) {
     let s = format!("{}:", level);
-    utils::print_with_color(&s, match level {
-        "info" => Color::Green,
-        "warning" => Color::Yellow,
-        "error" => Color::Red,
-        _ => Color::White,
-    }).unwrap();
-    
+    utils::print_with_color(
+        &s,
+        match level {
+            "info" => Color::Green,
+            "warning" => Color::Yellow,
+            "error" => Color::Red,
+            _ => Color::White,
+        },
+    )
+    .unwrap();
+
     let s = "(memory check)";
     utils::print_with_color(&s, Color::Cyan).unwrap();
-    
+
     let s = format!(" {}", text);
     utils::println_with_color(&s, Color::White).unwrap();
 }
@@ -708,7 +741,10 @@ fn output_code_and_problem_info(
     col_range: (usize, usize),
     problem_text: &str,
 ) {
-    let max_line_char_width = std::cmp::max(line_range.0.to_string().len(), line_range.1.to_string().len());
+    let max_line_char_width = std::cmp::max(
+        line_range.0.to_string().len(),
+        line_range.1.to_string().len(),
+    );
 
     let lines = utils::get_lines_in_file(filename, line_range);
 
@@ -735,15 +771,23 @@ fn output_code_and_problem_info(
 
         // print ^
         let col_start = if i == line_range.0 { col_range.0 } else { 1 };
-        let col_end = if i == line_range.1 { col_range.1 } else { line.len() };
+        let col_end = if i == line_range.1 {
+            col_range.1
+        } else {
+            line.len()
+        };
         let s = format!("{}| ", " ".repeat(max_line_char_width + 1));
         utils::print_with_color(&s, Color::Blue).unwrap();
-        let s = format!("{}{} ", " ".repeat(col_start - 1), "^".repeat(col_end - col_start + 1));
+        let s = format!(
+            "{}{} ",
+            " ".repeat(col_start - 1),
+            "^".repeat(col_end - col_start + 1)
+        );
         utils::print_with_color(&s, Color::Yellow).unwrap();
         if i == line_range.1 {
             let s = format!("{}", problem_text);
             utils::print_with_color(&s, Color::Yellow).unwrap();
-        } 
+        }
         utils::println_with_color("", Color::White).unwrap();
 
         // print |
@@ -751,4 +795,3 @@ fn output_code_and_problem_info(
         utils::println_with_color(&s, Color::Blue).unwrap();
     }
 }
-

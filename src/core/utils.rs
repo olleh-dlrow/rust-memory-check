@@ -1,12 +1,15 @@
-use std::{io::{Write, BufReader}, collections::{HashMap, HashSet}};
-use std::io::{BufRead};
+use std::io::BufRead;
+use std::{
+    collections::{HashMap, HashSet},
+    io::{BufReader, Write},
+};
 
 use rustc_hir::def_id::DefId;
 use rustc_span::Span;
 
 use crate::core::AnalysisOptions;
 
-use super::{cfg::ControlFlowGraph, GlobalBasicBlockId, BasicBlockId};
+use super::{cfg::ControlFlowGraph, BasicBlockId, GlobalBasicBlockId};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 pub const LOG4RS_CONFIG_YAML: &str = r#"
@@ -62,7 +65,9 @@ pub fn has_dbg(opts: &AnalysisOptions, opt_name: &str) -> bool {
 }
 
 pub fn has_entry(opts: &AnalysisOptions, def_id: DefId) -> bool {
-    opts.entries.iter().any(|entry| entry_is_suffix_of(&parse_entry(entry), &parse_def_id(def_id)))
+    opts.entries
+        .iter()
+        .any(|entry| entry_is_suffix_of(&parse_entry(entry), &parse_def_id(def_id)))
 }
 
 pub fn auto_detect_entries(opts: &AnalysisOptions) -> bool {
@@ -78,7 +83,6 @@ pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
     let mut debug_opts = vec![];
     let mut entries = vec![];
     let mut open_dbg = false;
-
 
     let mut try_get_arg_value = |name: &str| {
         for (i, arg) in args.iter().enumerate() {
@@ -112,7 +116,14 @@ pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
         .filter(|(i, _)| !index_removed.contains(i))
         .map(|(_, s)| s.to_owned())
         .collect::<Vec<String>>();
-    (AnalysisOptions { debug_opts, entries, open_dbg }, new_args)
+    (
+        AnalysisOptions {
+            debug_opts,
+            entries,
+            open_dbg,
+        },
+        new_args,
+    )
 }
 
 pub fn get_ty_from_place<'tcx>(
@@ -131,7 +142,13 @@ pub fn get_ty_from_place<'tcx>(
     place_ty.ty
 }
 
-pub fn can_call_arrive(cfgs: &HashMap<DefId, ControlFlowGraph>, visited: &mut HashSet<DefId>, from: DefId, to: DefId) -> bool {
+pub fn can_call_arrive(
+    cfgs: &HashMap<DefId, ControlFlowGraph>,
+    called_infos: &HashMap<DefId, HashSet<GlobalBasicBlockId>>,
+    visited: &mut HashSet<DefId>,
+    from: DefId,
+    to: DefId,
+) -> bool {
     if from == to {
         return true;
     }
@@ -146,8 +163,19 @@ pub fn can_call_arrive(cfgs: &HashMap<DefId, ControlFlowGraph>, visited: &mut Ha
     for (_, call_info) in from_cfg.call_infos.iter() {
         let next_id = call_info.callee_def_id;
         if cfgs.contains_key(&next_id) {
-            if can_call_arrive(cfgs, visited, next_id, to) {
+            if can_call_arrive(cfgs, called_infos, visited, next_id, to) {
                 return true;
+            }
+        }
+    }
+
+    if let Some(called_info) = called_infos.get(&from) {
+        for ret_g_bb_id in called_info {
+            let ret_def_id = ret_g_bb_id.def_id;
+            if cfgs.contains_key(&ret_def_id) {
+                if can_call_arrive(cfgs, called_infos, visited, ret_def_id, to) {
+                    return true;
+                }
             }
         }
     }
@@ -155,7 +183,120 @@ pub fn can_call_arrive(cfgs: &HashMap<DefId, ControlFlowGraph>, visited: &mut Ha
     return false;
 }
 
-pub fn can_basic_block_arrive(cfgs: &HashMap<DefId, ControlFlowGraph>, visited: &mut HashSet<GlobalBasicBlockId>, from: GlobalBasicBlockId, to: GlobalBasicBlockId) -> bool {
+
+// rewrite can basic block arrive with path recorded
+pub fn can_basic_block_arrive_with_path_record(
+    cfgs: &HashMap<DefId, ControlFlowGraph>,
+    called_infos: &HashMap<DefId, HashSet<GlobalBasicBlockId>>,
+    visited: &mut HashSet<GlobalBasicBlockId>,
+    from: GlobalBasicBlockId,
+    to: GlobalBasicBlockId,
+    path: &mut Vec<GlobalBasicBlockId>,
+) -> bool{
+    if visited.contains(&from) {
+        return false;
+    }
+
+    if !can_call_arrive(
+        cfgs,
+        called_infos,
+        &mut HashSet::new(),
+        from.def_id,
+        to.def_id,
+    ) {
+        return false;
+    }
+
+    visited.insert(from);
+
+    if from.def_id == to.def_id {
+        return can_inner_basic_block_arrive_with_path_record(
+            cfgs.get(&from.def_id).unwrap(),
+            &mut HashSet::new(),
+            from.bb_id,
+            to.bb_id,
+            path,
+        );
+    } else {
+        path.push(from);
+
+        let from_cfg = cfgs.get(&from.def_id).unwrap();
+        for (bb_id, call_info) in from_cfg.call_infos.iter() {
+            // register call
+            if cfgs.contains_key(&call_info.callee_def_id) {
+                // can internal transit to callsite
+                if can_inner_basic_block_arrive_with_path_record(from_cfg, &mut HashSet::new(), from.bb_id, *bb_id, path) {
+                    // walk to caller site, then transfer to the begin of callee, check next
+                    path.push(GlobalBasicBlockId::new(from.def_id, call_info.caller_bb_id));
+                    if can_basic_block_arrive_with_path_record(
+                        cfgs,
+                        called_infos,
+                        visited,
+                        GlobalBasicBlockId::new(
+                            call_info.callee_def_id,
+                            BasicBlockId::from_usize(0),
+                        ),
+                        to,
+                        path
+                    ) {
+                        return true;
+                    }
+                    path.pop();
+                }
+            }
+        }
+
+        // assume all basic block can return
+        if let Some(call_info) = called_infos.get(&from.def_id) {
+            for ret_g_bb_id in call_info {
+                if can_basic_block_arrive_with_path_record(cfgs, called_infos, visited, *ret_g_bb_id, to, path) {
+                    // we not ensure where it return
+                    // path.push(ret id);
+                    return true;
+                }
+            }
+        }
+
+        path.pop();
+        return false;
+    }
+} 
+
+fn can_inner_basic_block_arrive_with_path_record(
+    cfg: &ControlFlowGraph,
+    visited: &mut HashSet<BasicBlockId>,
+    from: BasicBlockId,
+    to: BasicBlockId,
+    path: &mut Vec<GlobalBasicBlockId>,
+) -> bool{
+    if from == to {
+        path.push(GlobalBasicBlockId::new(cfg.def_id, from));
+        return true;
+    }
+
+    if visited.contains(&from) {
+        return false;
+    }
+
+    visited.insert(from);
+    path.push(GlobalBasicBlockId::new(cfg.def_id, from));
+
+    for successor in cfg.basic_block_infos.get(&from).unwrap().successors.iter() {
+        if can_inner_basic_block_arrive_with_path_record(cfg, visited, *successor, to, path) {
+            return true;
+        }
+    }
+    path.pop();
+    return false;
+} 
+
+pub fn can_basic_block_arrive(
+    cfgs: &HashMap<DefId, ControlFlowGraph>,
+    called_infos: &HashMap<DefId, HashSet<GlobalBasicBlockId>>,
+    visited: &mut HashSet<GlobalBasicBlockId>,
+    from: GlobalBasicBlockId,
+    to: GlobalBasicBlockId,
+) -> bool {
     if from == to {
         return true;
     }
@@ -164,25 +305,54 @@ pub fn can_basic_block_arrive(cfgs: &HashMap<DefId, ControlFlowGraph>, visited: 
         return false;
     }
 
-    if !can_call_arrive(cfgs, &mut HashSet::new(), from.def_id, to.def_id) {
+    if !can_call_arrive(
+        cfgs,
+        called_infos,
+        &mut HashSet::new(),
+        from.def_id,
+        to.def_id,
+    ) {
         return false;
     }
 
     visited.insert(from);
-    
+
     if from.def_id == to.def_id {
-        return can_inner_basic_block_arrive(cfgs.get(&from.def_id).unwrap(), &mut HashSet::new(), from.bb_id, to.bb_id);
+        return can_inner_basic_block_arrive(
+            cfgs.get(&from.def_id).unwrap(),
+            &mut HashSet::new(),
+            from.bb_id,
+            to.bb_id,
+        );
     } else {
         let from_cfg = cfgs.get(&from.def_id).unwrap();
         for (bb_id, call_info) in from_cfg.call_infos.iter() {
             // register call
             if cfgs.contains_key(&call_info.callee_def_id) {
-                // can internal transit
+                // can internal transit to callsite
                 if can_inner_basic_block_arrive(from_cfg, &mut HashSet::new(), from.bb_id, *bb_id) {
                     // walk to caller site, then transfer to the begin of callee, check next
-                    if can_basic_block_arrive(cfgs, visited, GlobalBasicBlockId::new(call_info.callee_def_id, BasicBlockId::from_usize(0)), to) {
+                    if can_basic_block_arrive(
+                        cfgs,
+                        called_infos,
+                        visited,
+                        GlobalBasicBlockId::new(
+                            call_info.callee_def_id,
+                            BasicBlockId::from_usize(0),
+                        ),
+                        to,
+                    ) {
                         return true;
-                    }                                
+                    }
+                }
+            }
+        }
+
+        // assume all basic block can return
+        if let Some(call_info) = called_infos.get(&from.def_id) {
+            for ret_g_bb_id in call_info {
+                if can_basic_block_arrive(cfgs, called_infos, visited, *ret_g_bb_id, to) {
+                    return true;
                 }
             }
         }
@@ -191,7 +361,12 @@ pub fn can_basic_block_arrive(cfgs: &HashMap<DefId, ControlFlowGraph>, visited: 
     }
 }
 
-pub fn can_inner_basic_block_arrive(cfg: &ControlFlowGraph, visited: &mut HashSet<BasicBlockId>, from: BasicBlockId, to: BasicBlockId) -> bool {
+pub fn can_inner_basic_block_arrive(
+    cfg: &ControlFlowGraph,
+    visited: &mut HashSet<BasicBlockId>,
+    from: BasicBlockId,
+    to: BasicBlockId,
+) -> bool {
     if from == to {
         return true;
     }
@@ -219,11 +394,21 @@ pub fn parse_span(span: &Span) -> (String, (usize, usize), (usize, usize)) {
     let mut span_str_iter = span_str_iter.next().unwrap().split(':');
 
     let filename = span_str_iter.next().unwrap().to_string();
-    
+
     let line_lo = span_str_iter.next().unwrap().parse::<usize>().unwrap();
     let column_lo = span_str_iter.next().unwrap().parse::<usize>().unwrap();
-    let line_hi = span_str_iter.next().unwrap().trim().parse::<usize>().unwrap();
-    let column_hi = span_str_iter.next().unwrap().trim().parse::<usize>().unwrap();
+    let line_hi = span_str_iter
+        .next()
+        .unwrap()
+        .trim()
+        .parse::<usize>()
+        .unwrap();
+    let column_hi = span_str_iter
+        .next()
+        .unwrap()
+        .trim()
+        .parse::<usize>()
+        .unwrap();
 
     let line_range = (line_lo, line_hi);
     let column_range = (column_lo, column_hi);
@@ -236,16 +421,18 @@ pub fn parse_def_id(def_id: DefId) -> Vec<String> {
     let mut def_id_str_iter = def_id_str.split(" ~ ");
     let _ = def_id_str_iter.next();
     let def_id_str_iter = def_id_str_iter.next().unwrap().split("::");
-    
-    def_id_str_iter.map(|s| {
-        let mut s_iter = s.split('[');
-        let s = s_iter.next().unwrap();
 
-        let mut s_iter = s.split(')');
-        let s = s_iter.next().unwrap();
+    def_id_str_iter
+        .map(|s| {
+            let mut s_iter = s.split('[');
+            let s = s_iter.next().unwrap();
 
-        s.to_string()
-    }).collect()    
+            let mut s_iter = s.split(')');
+            let s = s_iter.next().unwrap();
+
+            s.to_string()
+        })
+        .collect()
 }
 
 pub fn parse_entry(entry: &str) -> Vec<String> {
@@ -269,18 +456,26 @@ pub fn entry_is_suffix_of(entry: &Vec<String>, def_id: &Vec<String>) -> bool {
 
 // get nodes with indegree is 0, which means they are the entry of the call graph. Loop edges are not considered.
 pub fn get_top_def_ids(cfgs: &HashMap<DefId, ControlFlowGraph>) -> Vec<DefId> {
-    
-    let mut in_degree = cfgs.keys().map(|k| (*k, 0)).collect::<HashMap<DefId, usize>>();
+    let mut in_degree = cfgs
+        .keys()
+        .map(|k| (*k, 0))
+        .collect::<HashMap<DefId, usize>>();
 
     for (def_id, cfg) in cfgs.iter() {
         for (_, call_info) in cfg.call_infos.iter() {
             if cfgs.contains_key(&call_info.callee_def_id) && call_info.callee_def_id != *def_id {
-                in_degree.entry(call_info.callee_def_id).and_modify(|e| *e += 1);
+                in_degree
+                    .entry(call_info.callee_def_id)
+                    .and_modify(|e| *e += 1);
             }
         }
     }
 
-    in_degree.iter().filter(|(_, v)| **v == 0).map(|(k, _)| *k).collect()
+    in_degree
+        .iter()
+        .filter(|(_, v)| **v == 0)
+        .map(|(k, _)| *k)
+        .collect()
 }
 
 pub fn print_with_color(text: &str, color: Color) -> Result<(), std::io::Error> {
@@ -299,7 +494,6 @@ pub fn println_with_color(text: &str, color: Color) -> Result<(), std::io::Error
     Ok(())
 }
 
-
 pub fn get_lines_in_file(file_path: &str, line_range: (usize, usize)) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -315,5 +509,3 @@ pub fn get_lines_in_file(file_path: &str, line_range: (usize, usize)) -> Vec<Str
 
     lines
 }
-
-

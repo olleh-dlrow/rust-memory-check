@@ -17,6 +17,7 @@ use crate::core::check;
 use crate::core::{analysis, pfg::PointerFlowGraph, AnalysisOptions, CallerContext, CtxtSenCallId};
 use termcolor::{Color};
 
+use crate::core::GlobalBasicBlockId;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use rustc_hir::def_id::DefId;
@@ -64,12 +65,15 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
         queries.global_ctxt().unwrap().peek_mut().enter(|tcx| {
             let mut cfgs: HashMap<DefId, ControlFlowGraph> = HashMap::new();
 
+            let mut called_infos = HashMap::<DefId, HashSet<GlobalBasicBlockId>>::new();
+
             // create control flow graphs
             tcx.hir().body_owners().for_each(|local_def_id| {
                 let def_id = local_def_id.to_def_id();
 
                 if let Some(cfg) = cfg::try_create_cfg(&self.options, tcx, def_id, true) {
                     assert!(!cfgs.contains_key(&def_id));
+                    cfg::add_called_info(&self.options, &mut called_infos, &cfg);
                     cfgs.insert(def_id, cfg);
                 }
             });
@@ -111,6 +115,7 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
                     options: self.options.clone(),
                     tcx,
                     cfgs: cfgs,
+                    called_infos: called_infos,
                     pfg: PointerFlowGraph::new(),
                     cs_reachable_calls: HashSet::new(),
                     worklist: VecDeque::new(),
@@ -123,13 +128,15 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
 
                 let check_info = check::check_memory_bug(&ctxt);
 
-
                 cfgs = ctxt.cfgs;
+                called_infos = ctxt.called_infos;
 
                 check_infos.insert(*entry_def_id, check_info);
             }
 
-
+            if utils::has_dbg(&self.options, "check-info") {
+                log::debug!("check infos: {:#?}", check_infos);
+            }
             let check_result = check::merge_check_info(&cfgs, &check_infos);
             if utils::has_dbg(&self.options, "check-result") {
                 log::debug!("check result: {:#?}", check_result);
