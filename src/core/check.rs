@@ -30,6 +30,8 @@ pub fn merge_check_info(
         local_info.var_name.clone()
     };
 
+
+    // first filter, ensure all deref span and drop span are not same
     // handle uaf info
     let mut uaf_results = HashMap::<UafSpan, HashSet<UafResult>>::new();
     let uaf_into_iter = check_infos
@@ -110,13 +112,62 @@ pub fn merge_check_info(
         }
     }
 
+
+    // second filter, merge all same first drop
+    let merged_uaf_results = merge_to_same_uaf_drop(&uaf_results);
+    let merged_df_results = merge_to_same_df_drop(&df_results);
+
+
     let mut check_result = CheckResult::new();
 
     check_result.uaf_results = uaf_results;
     check_result.df_results = df_results;
+    check_result.merged_uaf_results = merged_uaf_results;
+    check_result.merged_df_results = merged_df_results;
 
     check_result
 }
+
+fn merge_to_same_uaf_drop(uaf_results: &HashMap<UafSpan, HashSet<UafResult>>) -> HashMap<UnitResult, HashSet<UnitResult>> {
+    let mut merged_results = HashMap::<UnitResult, HashSet<UnitResult>>::new();
+    let uaf_iter = uaf_results.iter().map(|(_, result)| result.iter()).flatten();
+    
+    for uaf in uaf_iter {
+        let drop_unit = UnitResult::new(uaf.drop_span, uaf.drop_var_name.clone());
+        if !merged_results.contains_key(&drop_unit) {
+            merged_results.insert(drop_unit.clone(), HashSet::new());
+        }
+        let merged_results_with_drop = merged_results.get_mut(&drop_unit).unwrap();
+        let deref_unit = UnitResult::new(uaf.deref_span, uaf.deref_var_name.clone());
+        merged_results_with_drop.insert(deref_unit);
+    }
+
+    merged_results
+}
+
+fn merge_to_same_df_drop(df_results: &HashMap<DfSpan, HashSet<DfResult>>) -> HashMap<UnitResult, HashSet<UnitResult>> {
+    let mut merged_results = HashMap::<UnitResult, HashSet<UnitResult>>::new();
+    let df_iter = df_results.iter().map(|(_, result)| result.iter()).flatten();
+    
+    for df in df_iter {
+        let first_drop_unit = UnitResult::new(df.first_drop_span, df.first_drop_var_name.clone());
+        if !merged_results.contains_key(&first_drop_unit) {
+            merged_results.insert(first_drop_unit.clone(), HashSet::new());
+        }
+        let merged_results_with_first_drop = merged_results.get_mut(&first_drop_unit).unwrap();
+        let then_drop_unit = UnitResult::new(df.then_drop_span, df.then_drop_var_name.clone());
+        merged_results_with_first_drop.insert(then_drop_unit);
+    }
+
+    merged_results
+}
+
+
+
+
+
+
+
 
 pub fn output_check_result(check_result: &CheckResult) {
     // handle uaf
@@ -173,6 +224,61 @@ pub fn output_check_result(check_result: &CheckResult) {
     output_level_text("info", &total_str);
 }
 
+
+pub fn output_merged_result(check_result: &CheckResult){
+    // handle uaf
+    for drop_res in check_result.merged_uaf_results.keys() {
+        output_level_text("warning", "use after free memory bug may exists");
+        let (filename, line_range, column_range) = utils::parse_span(&drop_res.span);
+        let problem_text = match &drop_res.var_name {
+            Some(var_name) => format!("first drop here, relative variable: {}", var_name),
+            None => "first drop here.".to_string(),
+        };
+        output_code_and_problem_info(&filename, line_range, column_range, &problem_text);
+        
+        for deref_res in check_result.merged_uaf_results.get(drop_res).unwrap().iter() {
+            let (filename, line_range, column_range) = utils::parse_span(&deref_res.span);
+            let problem_text = match &deref_res.var_name {
+                Some(var_name) => format!("then dereference here, relative variable: {}", var_name),
+                None => "then dereference here.".to_string(),
+            };
+            output_code_and_problem_info(&filename, line_range, column_range, &problem_text);
+        }
+        utils::println_with_color("", Color::White).unwrap();
+        utils::println_with_color("", Color::White).unwrap();
+    }
+
+    // handle df
+    for first_drop_res in check_result.merged_df_results.keys() {
+        output_level_text("warning", "double free memory bug may exists");
+        let (filename, line_range, column_range) = utils::parse_span(&first_drop_res.span);
+        let problem_text = match &first_drop_res.var_name {
+            Some(var_name) => format!("first drop here, relative variable: {}", var_name),
+            None => "first drop here.".to_string(),
+        };
+        output_code_and_problem_info(&filename, line_range, column_range, &problem_text);
+        
+        for then_drop_res in check_result.merged_df_results.get(first_drop_res).unwrap().iter() {
+            let (filename, line_range, column_range) = utils::parse_span(&then_drop_res.span);
+            let problem_text = match &then_drop_res.var_name {
+                Some(var_name) => format!("then drop here, relative variable: {}", var_name),
+                None => "then drop here.".to_string(),
+            };
+            output_code_and_problem_info(&filename, line_range, column_range, &problem_text);
+        }
+        utils::println_with_color("", Color::White).unwrap();
+        utils::println_with_color("", Color::White).unwrap();
+    }
+
+    let total_str = format!(
+        "total: {} uaf bugs, {} df bugs",
+        check_result.merged_uaf_results.len(),
+        check_result.merged_df_results.len()
+    );
+    output_level_text("info", &total_str);
+} 
+
+
 #[derive(Debug)]
 pub struct CheckInfo {
     pub uaf_infos: Vec<UafInfo>,
@@ -188,10 +294,23 @@ impl CheckInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnitResult {
+    pub span: Span,
+    pub var_name: Option<String>,
+}
+
+impl UnitResult {
+    pub fn new(span: Span, var_name: Option<String>) -> Self {
+        Self { span, var_name }
+    }
+}
 #[derive(Debug)]
 pub struct CheckResult {
     pub uaf_results: HashMap<UafSpan, HashSet<UafResult>>,
+    pub merged_uaf_results: HashMap<UnitResult, HashSet<UnitResult>>,
     pub df_results: HashMap<DfSpan, HashSet<DfResult>>,
+    pub merged_df_results: HashMap<UnitResult, HashSet<UnitResult>>,
 }
 
 impl CheckResult {
@@ -199,6 +318,8 @@ impl CheckResult {
         Self {
             uaf_results: HashMap::new(),
             df_results: HashMap::new(),
+            merged_df_results: HashMap::new(),
+            merged_uaf_results: HashMap::new(),
         }
     }
 }

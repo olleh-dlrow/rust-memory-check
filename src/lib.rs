@@ -141,7 +141,7 @@ impl rustc_driver::Callbacks for MemoryCheckCallbacks {
             if utils::has_dbg(&self.options, "check-result") {
                 log::debug!("check result: {:#?}", check_result);
             }
-            check::output_check_result(&check_result);
+            check::output_merged_result(&check_result);
         });
         rustc_driver::Compilation::Continue
     }
