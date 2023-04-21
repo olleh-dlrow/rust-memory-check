@@ -163,9 +163,6 @@ fn get_rustc_args(is_rustc: bool) -> Vec<String> {
         rustc_args.push("-Clink-arg=-nostartfiles".to_owned());
     }
 
-    // Disable unwind to simplify the CFG
-    rustc_args.push("-Cpanic=abort".to_owned());
-
     // add sysroot
     if let Some(sysroot) = get_compile_time_sysroot() {
         let sysroot_flag = "--sysroot";

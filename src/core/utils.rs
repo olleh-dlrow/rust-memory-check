@@ -110,11 +110,22 @@ pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
         open_dbg = arg == "1";
     }
 
+    // add additional args
+    let mut additional_args: Vec<String> = vec![];
+
+    if let Some(arg) = try_get_arg_value("--ignore-unwind") {
+        if arg == "1" {
+            // Disable unwind to simplify the CFG
+            additional_args.push("-Cpanic=abort".to_owned());
+        }
+    }
+
     let new_args = args
         .into_iter()
         .enumerate()
         .filter(|(i, _)| !index_removed.contains(i))
         .map(|(_, s)| s.to_owned())
+        .chain(additional_args.into_iter())
         .collect::<Vec<String>>();
     (
         AnalysisOptions {

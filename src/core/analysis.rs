@@ -6,10 +6,10 @@ use rustc_middle::mir::Operand;
 use rustc_middle::mir::TerminatorKind;
 use rustc_middle::mir::{Place, PlaceElem};
 use std::collections::{HashMap, HashSet};
-use super::pfg::{PointerFlowGraph};
+use super::pfg::{PointerFlowGraph, DerefEdgeInfo};
 use super::{
     AnalysisOptions, CallerContext, CtxtSenCallId, CtxtSenSpanInfo, DropObjectId,
-    GlobalBasicBlockId, GlobalProjectionId, LocalId, RvalKind
+    GlobalBasicBlockId, GlobalProjectionId, LocalId, RvalKind, cfg
 };
 use crate::core::utils;
 use std::collections::VecDeque;
@@ -194,41 +194,42 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
             ctxt = add_reachable(ctxt, caller.clone());
 
             // TODO: ensure all callee cfgs are in cfgs
-            // let mut new_cfg_list = vec![];
-            // for (_, call_info) in ctxt.cfgs.get(&caller.def_id).unwrap().call_infos.iter() {
-            //     // if callee is not in cfgs, we need to create it
-            //     if !ctxt.cfgs.contains_key(&call_info.callee_def_id) {
-            //         let def_name = utils::parse_def_id(call_info.callee_def_id).join("::");
-            //         // we ignore the CHA of some common pointer related functions
-            //         if ARG_TO_RET_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
-            //             continue;
-            //         }
-            //         // we ignore the edge of some clone functions
-            //         if IGNORE_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
-            //             continue;
-            //         }
-            //         // we ignore all standard library functions
-            //         // if def_name.starts_with("std::") {
-            //         //     continue;
-            //         // }
+            let mut new_cfg_list = vec![];
+            for (_, call_info) in ctxt.cfgs.get(&caller.def_id).unwrap().call_infos.iter() {
+                // if callee is not in cfgs, we need to create it
+                if !ctxt.cfgs.contains_key(&call_info.callee_def_id) {
+                    let def_name = utils::parse_def_id(call_info.callee_def_id).join("::");
+                    // we ignore the CHA of some common pointer related functions
+                    if ARG_TO_RET_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
+                        continue;
+                    }
+                    // we ignore the edge of some clone functions
+                    if IGNORE_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
+                        continue;
+                    }
+                    // we ignore all standard library functions
+                    if def_name.starts_with("std::") {
+                        continue;
+                    }
 
-            //         // if def_name.starts_with("core::") {
-            //         //     continue;
-            //         // }
+                    if def_name.starts_with("core::") {
+                        continue;
+                    }
 
-            //         // if def_name.starts_with("alloc::") {
-            //         //     continue;
-            //         // }
-            //         if let Some(callee_cfg) =
-            //             cfg::try_create_cfg(&ctxt.options, ctxt.tcx, call_info.callee_def_id, false)
-            //         {
-            //             cfg::add_called_info(&self.options, &mut called_infos, &cfg);
-            //             new_cfg_list.push(callee_cfg);
-            //         }
-            //     }
-            // }
-            // ctxt.cfgs
-            //     .extend(new_cfg_list.into_iter().map(|cfg| (cfg.def_id, cfg)));
+                    if def_name.starts_with("alloc::") {
+                        continue;
+                    }
+
+                    if let Some(callee_cfg) =
+                        cfg::try_create_cfg(&ctxt.options, ctxt.tcx, call_info.callee_def_id, false)
+                    {
+                        cfg::add_called_info(&ctxt.options, &mut ctxt.called_infos, &callee_cfg);
+                        new_cfg_list.push(callee_cfg);
+                    }
+                }
+            }
+            ctxt.cfgs
+                .extend(new_cfg_list.into_iter().map(|cfg| (cfg.def_id, cfg)));
 
             // add edges from caller args to callee params
             let caller_cfg = ctxt.cfgs.get(&caller.def_id).unwrap();
@@ -447,6 +448,10 @@ fn add_args_and_ret_edge<'tcx>(
                 let arg_id = pfg.add_or_update_node(&caller, arg_place, None);
                 let param_id =
                     pfg.add_or_update_node(&callee_id, &Place::from(LocalId::from_usize(i)), None);
+                
+                // arguments are seen as deref
+                pfg.deref_edges.insert(DerefEdgeInfo::new(arg_id, param_id, (true, false)));
+
                 add_edge(pfg, worklist, arg_id, param_id, span_info.clone());
             } else {
                 log::debug!(
@@ -523,6 +528,8 @@ fn add_args_to_ret_edge<'tcx>(
                 if need_add_edge {
                     let arg_id = pfg.add_or_update_node(&caller, arg_place, None);
 
+                    // arguments are seen as deref
+                    pfg.deref_edges.insert(DerefEdgeInfo::new(arg_id, ret_id, (true, false)));
                     add_edge(pfg, worklist, arg_id, ret_id, span_info.clone());
                 } else {
                     log::debug!(
