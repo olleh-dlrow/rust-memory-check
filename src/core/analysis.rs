@@ -1,18 +1,18 @@
+use super::pfg::{DerefEdgeInfo, PointerFlowGraph};
+use super::{
+    cfg, AnalysisOptions, CallerContext, CtxtSenCallId, CtxtSenSpanInfo, DropObjectId,
+    GlobalBasicBlockId, GlobalProjectionId, LocalId, RvalKind,
+};
 use crate::core::cfg::ControlFlowGraph;
+use crate::core::utils;
+use crate::core::CallInfo;
 use crate::core::OpKind;
-use crate::core::{CallInfo};
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::Operand;
 use rustc_middle::mir::TerminatorKind;
 use rustc_middle::mir::{Place, PlaceElem};
-use std::collections::{HashMap, HashSet};
-use super::pfg::{PointerFlowGraph, DerefEdgeInfo};
-use super::{
-    AnalysisOptions, CallerContext, CtxtSenCallId, CtxtSenSpanInfo, DropObjectId,
-    GlobalBasicBlockId, GlobalProjectionId, LocalId, RvalKind, cfg
-};
-use crate::core::utils;
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 
 pub fn alias_analysis(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext {
     let mut ctxt = process_calls(ctxt, entry);
@@ -33,22 +33,24 @@ pub fn alias_analysis(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisCo
     }
 
     if utils::has_dbg(&ctxt.options, "pfgid") {
-        ctxt.pfg.debug_proj(|proj_node| {
-            log::debug!("projection: {:#?}", proj_node.projection);
-            log::debug!("points to: {:#?}", proj_node.points_to);
-            log::debug!("neighbors: {:#?}", proj_node.neighbors);
-        }, |def_name| {
-            def_name.ends_with("main") || def_name.ends_with("from")
-        }, |_local_id| {
-            // local_id.as_usize() == 1
-            true
-        }, |_global_proj_id| {
-            true
-        });
+        ctxt.pfg.debug_proj(
+            |proj_node| {
+                log::debug!("projection: {:#?}", proj_node.projection);
+                log::debug!("points to: {:#?}", proj_node.points_to);
+                log::debug!("neighbors: {:#?}", proj_node.neighbors);
+            },
+            |def_name| def_name.ends_with("main") || def_name.ends_with("from"),
+            |_local_id| {
+                // local_id.as_usize() == 1
+                true
+            },
+            |_global_proj_id| true,
+        );
     }
 
     if utils::has_dbg(&ctxt.options, "pfg-paths") {
-        ctxt.pfg.debug_paths(("main".to_owned(), LocalId::from_usize(1), 0));
+        ctxt.pfg
+            .debug_paths(("main".to_owned(), LocalId::from_usize(1), 0));
     }
 
     ctxt
@@ -200,24 +202,27 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
                 if !ctxt.cfgs.contains_key(&call_info.callee_def_id) {
                     let def_name = utils::parse_def_id(call_info.callee_def_id).join("::");
                     // we ignore the CHA of some common pointer related functions
-                    if ARG_TO_RET_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
-                        continue;
-                    }
+                    // if ARG_TO_RET_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
+                    //     continue;
+                    // }
                     // we ignore the edge of some clone functions
                     if IGNORE_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
                         continue;
                     }
-                    // we ignore all standard library functions
-                    if def_name.starts_with("std::") {
-                        continue;
-                    }
 
-                    if def_name.starts_with("core::") {
-                        continue;
-                    }
+                    if !utils::check_std(&ctxt.options) {
+                        // we ignore all standard library functions
+                        if def_name.starts_with("std::") {
+                            continue;
+                        }
 
-                    if def_name.starts_with("alloc::") {
-                        continue;
+                        if def_name.starts_with("core::") {
+                            continue;
+                        }
+
+                        if def_name.starts_with("alloc::") {
+                            continue;
+                        }
                     }
 
                     if let Some(callee_cfg) =
@@ -245,6 +250,7 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
                     call_work_list.push_back(callee_id.clone());
 
                     add_args_and_ret_edge(
+                        &ctxt.options,
                         &mut ctxt.pfg,
                         &mut ctxt.worklist,
                         ctxt.tcx,
@@ -266,8 +272,9 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
                     if IGNORE_DEF_NAMES.iter().any(|&s| def_name.ends_with(s)) {
                         continue;
                     }
-                    
+
                     add_args_to_ret_edge(
+                        &ctxt.options,
                         &mut ctxt.pfg,
                         &mut ctxt.worklist,
                         ctxt.tcx,
@@ -291,6 +298,106 @@ fn process_calls(ctxt: AnalysisContext, entry: CtxtSenCallId) -> AnalysisContext
     }
 }
 
+fn diffuse_to_sub_level(
+    ctxt: AnalysisContext,
+    cur_g_proj_id: GlobalProjectionId,
+    points_to: HashSet<DropObjectId>,
+) -> AnalysisContext {
+    let mut ctxt = ctxt;
+    let cur_proj_node = ctxt.pfg.get_projection_node(cur_g_proj_id);
+    for (proj_id, proj_node) in ctxt
+        .pfg
+        .get_node(cur_g_proj_id.g_local_id)
+        .projection_nodes
+        .iter()
+    {
+        if proj_id != &cur_g_proj_id.projection_id
+            && cur_proj_node
+                .caller_context
+                .is_same(&proj_node.caller_context)
+            && cur_proj_node.is_prefix_of(&proj_node.projection)
+        {
+            let points_to_set = PointsTo::new(
+                GlobalProjectionId::new(cur_g_proj_id.g_local_id, *proj_id),
+                points_to.clone(),
+            );
+            ctxt.worklist.push_back(points_to_set);
+        }
+    }
+    ctxt
+}
+
+fn normal_propagate(
+    ctxt: AnalysisContext,
+    cur_g_proj_id: GlobalProjectionId,
+    points_to: HashSet<DropObjectId>,
+) -> AnalysisContext {
+    let mut ctxt = ctxt;
+    let cur_proj_node = ctxt.pfg.get_projection_node(cur_g_proj_id);
+
+    for (neighbor, _) in cur_proj_node.neighbors.iter() {
+        ctxt.worklist
+            .push_back(PointsTo::new(*neighbor, points_to.clone()));
+    }
+
+    ctxt
+}
+
+fn diffuse_to_same_level(
+    ctxt: AnalysisContext,
+    cur_g_proj_id: GlobalProjectionId,
+    points_to: HashSet<DropObjectId>,
+) -> AnalysisContext {
+    let mut ctxt = ctxt;
+    let cur_proj_node = ctxt.pfg.get_projection_node(cur_g_proj_id);
+    let mut local_wl = vec![];
+    for (_, prefix_proj_node) in ctxt
+        .pfg
+        .get_node(cur_g_proj_id.g_local_id)
+        .projection_nodes
+        .iter()
+    {
+        if cur_proj_node
+            .caller_context
+            .is_same(&prefix_proj_node.caller_context)
+            && prefix_proj_node.is_prefix_of(&cur_proj_node.projection)
+        {
+            let suffix_projections =
+                cur_proj_node.projection[prefix_proj_node.projection.len()..].to_vec();
+
+            for (neighbor, _) in prefix_proj_node.neighbors.iter() {
+                // TODO: never diffuse to itself, not sure if this is correct
+                // if neighbor.g_local_id == cur_g_proj_id.g_local_id {
+                //     continue;
+                // }
+                let neighbor_proj_node = ctxt.pfg.get_projection_node(*neighbor);
+                let projections = neighbor_proj_node
+                    .projection
+                    .iter()
+                    .chain(suffix_projections.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                let call_id = CtxtSenCallId::new(
+                    neighbor.g_local_id.def_id,
+                    neighbor_proj_node.caller_context.clone(),
+                );
+
+                local_wl.push((call_id, neighbor.g_local_id, projections, points_to.clone()));
+            }
+        }
+    }
+
+    for (call_id, g_local_id, projections, points_to) in local_wl {
+        let virtual_node_id =
+            ctxt.pfg
+                .add_or_update_virtual_node(&call_id, g_local_id.local_id, &projections, None);
+        let points_to_set = PointsTo::new(virtual_node_id, points_to.clone());
+        ctxt.worklist.push_back(points_to_set);
+    }
+    ctxt
+}
+
 fn propagate(
     ctxt: AnalysisContext,
     cur_g_proj_id: GlobalProjectionId,
@@ -311,73 +418,13 @@ fn propagate(
             ctxt.pfg.multi_drop_objects.insert(cur_g_proj_id.into());
         }
 
-        let cur_proj_node = ctxt.pfg.get_projection_node(cur_g_proj_id);
-        // diffuse to sub level
-        for (proj_id, proj_node) in ctxt
-            .pfg
-            .get_node(cur_g_proj_id.g_local_id)
-            .projection_nodes
-            .iter()
-        {
-            if proj_id != &cur_g_proj_id.projection_id
-                && cur_proj_node
-                    .caller_context
-                    .is_same(&proj_node.caller_context)
-                && cur_proj_node.is_prefix_of(&proj_node.projection)
-            {
-                let points_to_set = PointsTo::new(
-                    GlobalProjectionId::new(cur_g_proj_id.g_local_id, *proj_id),
-                    points_to.clone(),
-                );
-                ctxt.worklist.push_back(points_to_set);
-            }
-        }
+        ctxt = diffuse_to_sub_level(ctxt, cur_g_proj_id, points_to.clone());
 
-        // diffuse to same level
-        let mut local_wl = vec![];
-        for (_, proj_node) in ctxt
-            .pfg
-            .get_node(cur_g_proj_id.g_local_id)
-            .projection_nodes
-            .iter()
-        {
-            if cur_proj_node
-                .caller_context
-                .is_same(&proj_node.caller_context)
-                && proj_node.is_prefix_of(&cur_proj_node.projection)
-            {
-                let suffix_projections =
-                    cur_proj_node.projection[proj_node.projection.len()..].to_vec();
-
-                for (neighbor, _) in proj_node.neighbors.iter() {
-                    let neighbor_proj_node = ctxt.pfg.get_projection_node(*neighbor);
-                    let projections = neighbor_proj_node
-                        .projection
-                        .iter()
-                        .chain(suffix_projections.iter())
-                        .cloned()
-                        .collect::<Vec<_>>();
-
-                    let call_id = CtxtSenCallId::new(
-                        neighbor.g_local_id.def_id,
-                        neighbor_proj_node.caller_context.clone(),
-                    );
-
-                    local_wl.push((call_id, neighbor.g_local_id, projections, points_to.clone()));
-                }
-            }
-        }
-
-        for (call_id, g_local_id, projections, points_to) in local_wl {
-            let virtual_node_id = ctxt.pfg.add_or_update_virtual_node(
-                &call_id,
-                g_local_id.local_id,
-                &projections,
-                None,
-            );
-            let points_to_set = PointsTo::new(virtual_node_id, points_to.clone());
-            ctxt.worklist.push_back(points_to_set);
-        }
+        ctxt = if utils::check_same_level(&ctxt.options) {
+            diffuse_to_same_level(ctxt, cur_g_proj_id, points_to.clone())
+        } else {
+            normal_propagate(ctxt, cur_g_proj_id, points_to.clone())
+        };
 
         ctxt
     } else {
@@ -402,6 +449,7 @@ fn is_ptr_copy<'tcx>(
 }
 
 fn add_args_and_ret_edge<'tcx>(
+    opts: &AnalysisOptions,
     pfg: &mut PointerFlowGraph<'tcx>,
     worklist: &mut VecDeque<PointsTo>,
     tcx: rustc_middle::ty::TyCtxt<'tcx>,
@@ -448,9 +496,12 @@ fn add_args_and_ret_edge<'tcx>(
                 let arg_id = pfg.add_or_update_node(&caller, arg_place, None);
                 let param_id =
                     pfg.add_or_update_node(&callee_id, &Place::from(LocalId::from_usize(i)), None);
-                
+
                 // arguments are seen as deref
-                pfg.deref_edges.insert(DerefEdgeInfo::new(arg_id, param_id, (true, false)));
+                if utils::let_arg_as_deref(opts) {
+                    pfg.deref_edges
+                        .insert(DerefEdgeInfo::new(arg_id, param_id, (true, false)));
+                }
 
                 add_edge(pfg, worklist, arg_id, param_id, span_info.clone());
             } else {
@@ -478,6 +529,7 @@ fn add_args_and_ret_edge<'tcx>(
 }
 
 fn add_args_to_ret_edge<'tcx>(
+    opts: &AnalysisOptions,
     pfg: &mut PointerFlowGraph<'tcx>,
     worklist: &mut VecDeque<PointsTo>,
     tcx: rustc_middle::ty::TyCtxt<'tcx>,
@@ -529,7 +581,10 @@ fn add_args_to_ret_edge<'tcx>(
                     let arg_id = pfg.add_or_update_node(&caller, arg_place, None);
 
                     // arguments are seen as deref
-                    pfg.deref_edges.insert(DerefEdgeInfo::new(arg_id, ret_id, (true, false)));
+                    if utils::let_arg_as_deref(opts) {
+                        pfg.deref_edges
+                            .insert(DerefEdgeInfo::new(arg_id, ret_id, (true, false)));
+                    }
                     add_edge(pfg, worklist, arg_id, ret_id, span_info.clone());
                 } else {
                     log::debug!(
@@ -544,7 +599,6 @@ fn add_args_to_ret_edge<'tcx>(
     }
 }
 
-
 lazy_static! {
 
 // args directy to ret
@@ -552,7 +606,7 @@ static ref ARG_TO_RET_DEF_NAMES: Vec<&'static str> = vec![
     // Box
     "from_raw",
     "into_raw",
-    
+
     // ptr
     "as_ref",
     "as_mut",
@@ -585,5 +639,3 @@ static ref IGNORE_DEF_NAMES: Vec<&'static str> = vec![
     "clone",
 ];
 }
-
-

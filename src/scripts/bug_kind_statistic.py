@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
 import os
 import json
 import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 from time import sleep
+from matplotlib.font_manager import FontProperties
 
 
 # 爬取网页内容：https://rustsec.org/keywords/，并保存到本地
@@ -166,12 +168,19 @@ def draw_memory_safety_statistics(top=5):
     counts = [i['counts'] for i in all_records][0:top]
     plt.bar(kinds, counts)
     plt.xticks(kinds, rotation=45)
+    font = FontProperties(fname=r"simsun.ttc", size=14)
+    # 显示横轴标签为“漏洞类型”
+    plt.xlabel('漏洞类型', fontproperties=font)
+    # 显示纵轴标签为“漏洞数量”
+    plt.ylabel('漏洞数量', fontproperties=font)  
+    # 显示图标题为“2021-2023年RustSec数据库中内存安全漏洞数量统计”
+    plt.title('2021-2023年RustSec数据库中内存安全漏洞数量统计', fontproperties=font)
     for x, y in zip(kinds, counts):
         plt.text(x, y + 0.05, '%d' % y, ha='center', va='bottom')
-    plt.subplots_adjust(left=0.026, bottom=0.157, right=0.97, top=0.957, wspace=0.2, hspace=0.2)
-    # plt.show()
-    plt.gcf().set_size_inches(26.54, 13.80)
-    plt.savefig('data/memory_safety_statistics_top' + str(top) + '.png', dpi=96)
+    # plt.subplots_adjust(left=0.026, bottom=0.157, right=0.97, top=0.957, wspace=0.2, hspace=0.2)
+    plt.show()
+    # plt.gcf().set_size_inches(26.54, 13.80)
+    # plt.savefig('data/memory_safety_statistics_top' + str(top) + '.png', dpi=96)
     plt.tight_layout()
     
 

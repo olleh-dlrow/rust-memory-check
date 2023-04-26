@@ -18,6 +18,9 @@ pub struct AnalysisOptions {
     pub debug_opts: Vec<String>,
     pub entries: Vec<String>,
     pub open_dbg: bool,
+    pub open_same_level: bool,
+    pub let_arg_as_deref: bool,
+    pub check_std: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]

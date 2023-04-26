@@ -78,11 +78,26 @@ pub fn open_dbg(opts: &AnalysisOptions) -> bool {
     opts.open_dbg
 }
 
+pub fn check_same_level(opts: &AnalysisOptions) -> bool {
+    opts.open_same_level
+}
+
+pub fn let_arg_as_deref(opts: &AnalysisOptions) -> bool {
+    opts.let_arg_as_deref
+}
+
+pub fn check_std(opts: &AnalysisOptions) -> bool {
+    opts.check_std
+}
+
 pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
     let mut index_removed = vec![];
     let mut debug_opts = vec![];
     let mut entries = vec![];
     let mut open_dbg = false;
+    let mut open_same_level = false;
+    let mut let_arg_as_deref = false;
+    let mut check_std = false;
 
     let mut try_get_arg_value = |name: &str| {
         for (i, arg) in args.iter().enumerate() {
@@ -110,6 +125,18 @@ pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
         open_dbg = arg == "1";
     }
 
+    if let Some(arg) = try_get_arg_value("--same-level") {
+        open_same_level = arg == "1";
+    }
+
+    if let Some(arg) = try_get_arg_value("--extend-deref") {
+        let_arg_as_deref = arg == "1";
+    }
+
+    if let Some(arg) = try_get_arg_value("--check-std") {
+        check_std = arg == "1";
+    }
+
     // add additional args
     let mut additional_args: Vec<String> = vec![];
 
@@ -132,6 +159,9 @@ pub fn parse_args(args: &[String]) -> (AnalysisOptions, Vec<String>) {
             debug_opts,
             entries,
             open_dbg,
+            open_same_level,
+            let_arg_as_deref,
+            check_std
         },
         new_args,
     )
